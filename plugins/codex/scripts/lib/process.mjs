@@ -54,6 +54,21 @@ function looksLikeMissingProcessMessage(text) {
   return /not found|no running instance|cannot find|does not exist|no such process/i.test(text);
 }
 
+export function isProcessAlive(pidValue) {
+  const pid = Number(pidValue);
+  if (!Number.isFinite(pid) || pid <= 0) {
+    return false;
+  }
+  try {
+    process.kill(Math.trunc(pid), 0);
+    return true;
+  } catch (error) {
+    // EPERM = process exists, we just lack permission to signal it.
+    // ESRCH (or anything else) = treat as dead.
+    return error?.code === "EPERM";
+  }
+}
+
 export function terminateProcessTree(pid, options = {}) {
   if (!Number.isFinite(pid)) {
     return { attempted: false, delivered: false, method: null };

@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { isProcessAlive } from "./process.mjs";
 import { resolveWorkspaceRoot } from "./workspace.mjs";
 
 const STATE_VERSION = 1;
@@ -146,8 +147,80 @@ export function upsertJob(cwd, jobPatch) {
   });
 }
 
+function normalizeTrackedPid(pidValue) {
+  const pid = Number(pidValue);
+  if (!Number.isFinite(pid) || pid <= 0) {
+    return null;
+  }
+  return Math.trunc(pid);
+}
+
+function reconcileDeadPidJobs(cwd, jobs) {
+  const deadCandidates = [];
+  for (const job of jobs) {
+    if (job?.status !== "running") continue;
+    const pid = normalizeTrackedPid(job.pid);
+    if (pid === null) continue;
+    if (isProcessAlive(pid)) continue;
+    deadCandidates.push({ id: job.id, pid });
+  }
+
+  if (deadCandidates.length === 0) {
+    return jobs;
+  }
+
+  const completedAt = nowIso();
+  const applied = new Map();
+
+  for (const { id, pid } of deadCandidates) {
+    const jobFile = resolveJobFile(cwd, id);
+    let stored;
+    try {
+      stored = readJobFile(jobFile);
+    } catch {
+      continue;
+    }
+
+    // Guard 1: skip if persisted state is no longer active (raced with legit completion).
+    if (stored.status !== "running" && stored.status !== "queued") {
+      continue;
+    }
+    // Guard 2: skip if the persisted PID changed (OS recycled PID, or job was re-spawned).
+    if (normalizeTrackedPid(stored.pid) !== pid) {
+      continue;
+    }
+
+    const failedPatch = {
+      status: "failed",
+      phase: "failed",
+      pid: null,
+      errorMessage: `Process PID ${pid} exited unexpectedly; auto-reconciled as failed.`,
+      completedAt
+    };
+
+    writeJobFile(cwd, id, { ...stored, ...failedPatch });
+    applied.set(id, { ...failedPatch, updatedAt: completedAt });
+  }
+
+  if (applied.size === 0) {
+    return jobs;
+  }
+
+  updateState(cwd, (state) => {
+    for (const job of state.jobs) {
+      const patch = applied.get(job.id);
+      if (patch) Object.assign(job, patch);
+    }
+  });
+
+  return jobs.map((job) => {
+    const patch = applied.get(job.id);
+    return patch ? { ...job, ...patch } : job;
+  });
+}
+
 export function listJobs(cwd) {
-  return loadState(cwd).jobs;
+  return reconcileDeadPidJobs(cwd, loadState(cwd).jobs);
 }
 
 export function setConfig(cwd, key, value) {
