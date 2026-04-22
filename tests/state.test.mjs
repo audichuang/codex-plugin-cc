@@ -295,6 +295,30 @@ test("listJobs reconciliation TOCTOU guard: skips when persisted state already m
   assert.equal(persisted.autoReconciled, undefined);
 });
 
+test("listJobs reconciles dead-PID queued jobs so a crashed background launcher cannot block future tasks", () => {
+  // Regression for the blocker found in the third Codex review round:
+  // `/codex:rescue --background` persists the record as status:"queued"
+  // with the detached child's pid, and only flips to "running" after the
+  // worker takes over. If the worker dies before that promotion, the
+  // record must still be reconciled — otherwise it stays "queued" forever
+  // and the active-job guard in codex-companion.mjs treats it as a live
+  // task and rejects every subsequent /codex:rescue dispatch.
+  const workspace = makeTempDir();
+  const deadPid = 2147483642;
+  seedActiveJob(workspace, {
+    id: "task-dead-queued",
+    status: "queued",
+    phase: "queued",
+    pid: deadPid
+  });
+
+  const [reconciled] = listJobs(workspace);
+
+  assert.equal(reconciled.status, "failed");
+  assert.equal(reconciled.autoReconciled, true);
+  assert.equal(reconciled.reconciledDeadPid, deadPid);
+});
+
 test("listJobs reconciliation PID-identity guard: skips when persisted pid no longer matches", () => {
   const workspace = makeTempDir();
   const deadPidObservedByIndex = 2147483643;

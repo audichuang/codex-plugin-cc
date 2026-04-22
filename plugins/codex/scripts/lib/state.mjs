@@ -216,7 +216,14 @@ export function applyJobPatchIfActive(cwd, jobId, patchOrBuilder, extraGuard = n
 function reconcileDeadPidJobs(cwd, jobs) {
   const deadCandidates = [];
   for (const job of jobs) {
-    if (job?.status !== "running") continue;
+    // Reconcile any active state with a tracked PID. Background launches
+    // persist `queued` records carrying the detached worker's child.pid
+    // before `runTrackedJob` promotes them to `running`; if the worker
+    // dies in that window, a `queued`-only check would leave the job
+    // stuck forever and permanently block all future /codex:rescue runs
+    // because the active-job guard in codex-companion.mjs treats queued
+    // as active.
+    if (job?.status !== "running" && job?.status !== "queued") continue;
     const pid = normalizeTrackedPid(job.pid);
     if (pid === null) continue;
     if (isProcessAlive(pid)) continue;
