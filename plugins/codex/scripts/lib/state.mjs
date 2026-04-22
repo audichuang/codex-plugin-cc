@@ -194,12 +194,29 @@ function reconcileDeadPidJobs(cwd, jobs) {
       status: "failed",
       phase: "failed",
       pid: null,
-      errorMessage: `Process PID ${pid} exited unexpectedly; auto-reconciled as failed.`,
-      completedAt
+      errorMessage: `Worker process PID ${pid} exited without reporting a terminal status; auto-reconciled as failed.`,
+      completedAt,
+      autoReconciled: true,
+      reconciledDeadPid: pid
     };
 
     writeJobFile(cwd, id, { ...stored, ...failedPatch });
     applied.set(id, { ...failedPatch, updatedAt: completedAt });
+
+    // Also write a human-visible marker into the job log so the next
+    // /codex:status renders something explanatory instead of going silent.
+    const logTarget = stored.logFile ?? null;
+    if (logTarget) {
+      try {
+        fs.appendFileSync(
+          logTarget,
+          `[${completedAt}] Auto-reconciled: worker process PID ${pid} exited without reporting a terminal status. Job marked failed.\n`,
+          "utf8"
+        );
+      } catch {
+        // Best effort; never let logging failures crash status reads.
+      }
+    }
   }
 
   if (applied.size === 0) {

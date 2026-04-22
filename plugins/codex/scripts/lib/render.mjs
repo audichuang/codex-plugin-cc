@@ -123,6 +123,12 @@ function appendActiveJobsTable(lines, jobs) {
 
 function pushJobDetails(lines, job, options = {}) {
   lines.push(`- ${formatJobLine(job)}`);
+  if (job.autoReconciled) {
+    const pidSuffix = job.reconciledDeadPid ? ` (PID ${job.reconciledDeadPid})` : "";
+    lines.push(`  ! Auto-reconciled as failed: worker process${pidSuffix} exited without reporting.`);
+  } else if (job.errorMessage && (job.status === "failed" || job.status === "cancelled")) {
+    lines.push(`  Error: ${job.errorMessage}`);
+  }
   if (job.summary) {
     lines.push(`  Summary: ${job.summary}`);
   }
@@ -131,6 +137,10 @@ function pushJobDetails(lines, job, options = {}) {
   }
   if (options.showElapsed && job.elapsed) {
     lines.push(`  Elapsed: ${job.elapsed}`);
+  }
+  if (options.showElapsed && job.idleFor) {
+    const marker = job.staleLog ? "  ! " : "  ";
+    lines.push(`${marker}Last activity: ${job.idleFor}${job.staleLog ? " — no log output; process may be stuck" : ""}`);
   }
   if (options.showDuration && job.duration) {
     lines.push(`  Duration: ${job.duration}`);

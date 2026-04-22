@@ -7,6 +7,7 @@ import { resolveWorkspaceRoot } from "./workspace.mjs";
 
 export const DEFAULT_MAX_STATUS_JOBS = 8;
 export const DEFAULT_MAX_PROGRESS_LINES = 4;
+export const STALE_LOG_THRESHOLD_MS = 2 * 60 * 1000;
 
 export function sortJobsNewestFirst(jobs) {
   return [...jobs].sort((left, right) => String(right.updatedAt ?? "").localeCompare(String(left.updatedAt ?? "")));
@@ -46,8 +47,10 @@ function getJobTypeLabel(job) {
   return "job";
 }
 
-function stripLogPrefix(line) {
-  return line.replace(/^\[[^\]]+\]\s*/, "").trim();
+function parseLogLine(line) {
+  const match = line.match(/^\[([^\]]+)\]\s*(.*)$/);
+  if (!match) return null;
+  return { timestamp: match[1], text: match[2].trim() };
 }
 
 function isProgressBlockTitle(line) {
@@ -58,21 +61,58 @@ function isProgressBlockTitle(line) {
   );
 }
 
+function formatRelativeAgo(ms) {
+  if (!Number.isFinite(ms) || ms < 0) return null;
+  const totalSeconds = Math.floor(ms / 1000);
+  if (totalSeconds < 60) return `${totalSeconds}s ago`;
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) return `${hours}h ${minutes}m ago`;
+  return `${minutes}m ${seconds}s ago`;
+}
+
 export function readJobProgressPreview(logFile, maxLines = DEFAULT_MAX_PROGRESS_LINES) {
   if (!logFile || !fs.existsSync(logFile)) {
     return [];
   }
 
-  const lines = fs
-    .readFileSync(logFile, "utf8")
-    .split(/\r?\n/)
-    .map((line) => line.trimEnd())
-    .filter(Boolean)
-    .filter((line) => line.startsWith("["))
-    .map(stripLogPrefix)
-    .filter((line) => line && !isProgressBlockTitle(line));
+  const now = Date.now();
+  const result = [];
+  const rawLines = fs.readFileSync(logFile, "utf8").split(/\r?\n/);
 
-  return lines.slice(-maxLines);
+  for (const raw of rawLines) {
+    const trimmed = raw.trimEnd();
+    if (!trimmed || !trimmed.startsWith("[")) continue;
+    const parsed = parseLogLine(trimmed);
+    if (!parsed || !parsed.text || isProgressBlockTitle(parsed.text)) continue;
+    const lineTime = Date.parse(parsed.timestamp);
+    const ago = Number.isFinite(lineTime) ? formatRelativeAgo(now - lineTime) : null;
+    result.push(ago ? `[${ago}] ${parsed.text}` : parsed.text);
+  }
+
+  return result.slice(-maxLines);
+}
+
+function computeIdleInfo(logFile) {
+  if (!logFile) return null;
+  let stat;
+  try {
+    stat = fs.statSync(logFile);
+  } catch {
+    return null;
+  }
+  const lastActivityMs = stat.mtimeMs;
+  const idleMs = Math.max(0, Date.now() - lastActivityMs);
+  return {
+    lastActivityAt: new Date(lastActivityMs).toISOString(),
+    idleForMs: idleMs,
+    idleFor: formatRelativeAgo(idleMs)
+  };
+}
+
+function stripRelativePrefix(line) {
+  return line.replace(/^\[[^\]]+ago\]\s*/, "");
 }
 
 function formatElapsedDuration(startValue, endValue = null) {
@@ -121,7 +161,7 @@ function inferLegacyJobPhase(job, progressPreview = []) {
   }
 
   for (let index = progressPreview.length - 1; index >= 0; index -= 1) {
-    const line = progressPreview[index].toLowerCase();
+    const line = stripRelativePrefix(progressPreview[index]).toLowerCase();
     if (line.startsWith("starting codex") || line.startsWith("thread ready") || line.startsWith("turn started")) {
       return "starting";
     }
@@ -160,6 +200,9 @@ function inferLegacyJobPhase(job, progressPreview = []) {
 
 export function enrichJob(job, options = {}) {
   const maxProgressLines = options.maxProgressLines ?? DEFAULT_MAX_PROGRESS_LINES;
+  const isActive = job.status === "queued" || job.status === "running";
+  const idle = isActive ? computeIdleInfo(job.logFile) : null;
+
   const enriched = {
     ...job,
     kindLabel: getJobTypeLabel(job),
@@ -171,7 +214,11 @@ export function enrichJob(job, options = {}) {
     duration:
       job.status === "completed" || job.status === "failed" || job.status === "cancelled"
         ? formatElapsedDuration(job.startedAt ?? job.createdAt, job.completedAt ?? job.updatedAt)
-        : null
+        : null,
+    lastActivityAt: idle?.lastActivityAt ?? null,
+    idleForMs: idle?.idleForMs ?? null,
+    idleFor: idle?.idleFor ?? null,
+    staleLog: Boolean(idle && idle.idleForMs > STALE_LOG_THRESHOLD_MS)
   };
 
   return {
