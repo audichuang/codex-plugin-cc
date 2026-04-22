@@ -126,6 +126,11 @@ function pushJobDetails(lines, job, options = {}) {
   if (job.autoReconciled) {
     const pidSuffix = job.reconciledDeadPid ? ` (PID ${job.reconciledDeadPid})` : "";
     lines.push(`  ! Auto-reconciled as failed: worker process${pidSuffix} exited without reporting.`);
+  } else if (job.timedOut) {
+    lines.push(`  ! Hard timeout: runner watchdog aborted the job after exceeding the configured duration.`);
+    if (job.errorMessage) {
+      lines.push(`  Error: ${job.errorMessage}`);
+    }
   } else if (job.errorMessage && (job.status === "failed" || job.status === "cancelled")) {
     lines.push(`  Error: ${job.errorMessage}`);
   }
@@ -140,7 +145,10 @@ function pushJobDetails(lines, job, options = {}) {
   }
   if (options.showElapsed && job.idleFor) {
     const marker = job.staleLog ? "  ! " : "  ";
-    lines.push(`${marker}Last activity: ${job.idleFor}${job.staleLog ? " — no log output; process may be stuck" : ""}`);
+    const timeoutHint =
+      job.staleLog && job.timeoutRemaining ? ` (hard timeout in ${job.timeoutRemaining})` : "";
+    const stuckHint = job.staleLog ? " — no log output; process may be stuck" : "";
+    lines.push(`${marker}Last activity: ${job.idleFor}${stuckHint}${timeoutHint}`);
   }
   if (options.showDuration && job.duration) {
     lines.push(`  Duration: ${job.duration}`);

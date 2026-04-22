@@ -203,6 +203,10 @@ export function enrichJob(job, options = {}) {
   const isActive = job.status === "queued" || job.status === "running";
   const idle = isActive ? computeIdleInfo(job.logFile) : null;
 
+  const timeoutAt = typeof job.timeoutAt === "string" ? Date.parse(job.timeoutAt) : null;
+  const timeoutRemainingMs =
+    isActive && Number.isFinite(timeoutAt) ? Math.max(0, timeoutAt - Date.now()) : null;
+
   const enriched = {
     ...job,
     kindLabel: getJobTypeLabel(job),
@@ -218,7 +222,10 @@ export function enrichJob(job, options = {}) {
     lastActivityAt: idle?.lastActivityAt ?? null,
     idleForMs: idle?.idleForMs ?? null,
     idleFor: idle?.idleFor ?? null,
-    staleLog: Boolean(idle && idle.idleForMs > STALE_LOG_THRESHOLD_MS)
+    staleLog: Boolean(idle && idle.idleForMs > STALE_LOG_THRESHOLD_MS),
+    timeoutRemainingMs,
+    timeoutRemaining:
+      timeoutRemainingMs == null ? null : formatRelativeAgo(timeoutRemainingMs)?.replace(/ ago$/, "")
   };
 
   return {

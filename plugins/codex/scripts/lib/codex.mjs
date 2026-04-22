@@ -597,6 +597,31 @@ async function captureTurn(client, threadId, startRequest, options = {}) {
       completeTurn(state, response.turn);
     }
 
+    // Transport-level watchdog: if the app-server (direct or via broker)
+    // disconnects before we see turn/completed or a final_answer-phase
+    // agentMessage, state.completion will never resolve on its own. Race
+    // against client.exitPromise so the companion always reaches a terminal
+    // state. This avoids the "captureTurn hangs indefinitely" failure mode
+    // that leaves a job stuck at status:running even though no worker exists.
+    const transportWatchdog = client.exitPromise.then(() => {
+      if (state.completed) return;
+      if (state.finalAnswerSeen) {
+        // final_answer was seen; the 250ms inferred-completion timer may or
+        // may not have fired, and the transport closed before turn/completed.
+        // Treat as inferred success — this is the same fallback the existing
+        // scheduleInferredCompletion path uses.
+        completeTurn(state, null, { inferred: true });
+        return;
+      }
+      const exitError =
+        client.exitError ?? state.error ??
+        new Error("Codex app-server disconnected before the turn completed (no turn/completed or final_answer received).");
+      state.error = state.error ?? exitError;
+      state.rejectCompletion(exitError);
+    });
+    // Swallow unhandled-rejection noise; we only care that the watchdog fires.
+    transportWatchdog.catch?.(() => {});
+
     return await state.completion;
   } finally {
     clearCompletionTimer(state);

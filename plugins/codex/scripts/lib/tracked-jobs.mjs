@@ -4,9 +4,28 @@ import process from "node:process";
 import { readJobFile, resolveJobFile, resolveJobLogFile, upsertJob, writeJobFile } from "./state.mjs";
 
 export const SESSION_ID_ENV = "CODEX_COMPANION_SESSION_ID";
+export const JOB_TIMEOUT_ENV = "CODEX_JOB_TIMEOUT_MS";
+export const DEFAULT_JOB_TIMEOUT_MS = 15 * 60 * 1000;
 
 export function nowIso() {
   return new Date().toISOString();
+}
+
+function resolveJobTimeoutMs(options) {
+  if (Number.isFinite(options.timeoutMs) && options.timeoutMs > 0) {
+    return options.timeoutMs;
+  }
+  const envValue = Number(process.env[JOB_TIMEOUT_ENV]);
+  if (Number.isFinite(envValue) && envValue > 0) {
+    return envValue;
+  }
+  return DEFAULT_JOB_TIMEOUT_MS;
+}
+
+function formatTimeoutHuman(ms) {
+  if (ms >= 60_000) return `${Math.round(ms / 60_000)}m`;
+  if (ms >= 1000) return `${Math.round(ms / 1000)}s`;
+  return `${ms}ms`;
 }
 
 function normalizeProgressEvent(value) {
@@ -140,19 +159,41 @@ function readStoredJobOrNull(workspaceRoot, jobId) {
 }
 
 export async function runTrackedJob(job, runner, options = {}) {
+  const timeoutMs = resolveJobTimeoutMs(options);
   const runningRecord = {
     ...job,
     status: "running",
     startedAt: nowIso(),
     phase: "starting",
     pid: process.pid,
-    logFile: options.logFile ?? job.logFile ?? null
+    logFile: options.logFile ?? job.logFile ?? null,
+    timeoutAt: new Date(Date.now() + timeoutMs).toISOString(),
+    timeoutMs
   };
   writeJobFile(job.workspaceRoot, job.id, runningRecord);
   upsertJob(job.workspaceRoot, runningRecord);
 
+  // Layer-2 watchdog: no matter what goes wrong inside runner (captureTurn
+  // hang, broker wedge, internal deadlock), this timer guarantees the job
+  // reaches a terminal state. Layer 1 (captureTurn exitPromise watchdog) and
+  // layer 3 (listJobs dead-PID reconciliation) catch most cases — this is
+  // the backstop for the rest.
+  let timeoutHandle = null;
+  let timedOut = false;
+  const timeoutPromise = new Promise((_resolve, reject) => {
+    timeoutHandle = setTimeout(() => {
+      timedOut = true;
+      reject(new Error(`Tracked job ${job.id} exceeded the ${formatTimeoutHuman(timeoutMs)} hard timeout and was aborted by the runner watchdog.`));
+    }, timeoutMs);
+    timeoutHandle.unref?.();
+  });
+
   try {
-    const execution = await runner();
+    const execution = await Promise.race([runner(), timeoutPromise]);
+    if (timeoutHandle) {
+      clearTimeout(timeoutHandle);
+      timeoutHandle = null;
+    }
     const completionStatus = execution.exitStatus === 0 ? "completed" : "failed";
     const completedAt = nowIso();
     writeJobFile(job.workspaceRoot, job.id, {
@@ -179,25 +220,31 @@ export async function runTrackedJob(job, runner, options = {}) {
     appendLogBlock(options.logFile ?? job.logFile ?? null, "Final output", execution.rendered);
     return execution;
   } catch (error) {
+    if (timeoutHandle) {
+      clearTimeout(timeoutHandle);
+      timeoutHandle = null;
+    }
     const errorMessage = error instanceof Error ? error.message : String(error);
     const existing = readStoredJobOrNull(job.workspaceRoot, job.id) ?? runningRecord;
     const completedAt = nowIso();
-    writeJobFile(job.workspaceRoot, job.id, {
-      ...existing,
+    const failurePatch = {
       status: "failed",
       phase: "failed",
       errorMessage,
       pid: null,
-      completedAt,
+      completedAt
+    };
+    if (timedOut) {
+      failurePatch.timedOut = true;
+    }
+    writeJobFile(job.workspaceRoot, job.id, {
+      ...existing,
+      ...failurePatch,
       logFile: options.logFile ?? job.logFile ?? existing.logFile ?? null
     });
     upsertJob(job.workspaceRoot, {
       id: job.id,
-      status: "failed",
-      phase: "failed",
-      pid: null,
-      errorMessage,
-      completedAt
+      ...failurePatch
     });
     throw error;
   }
