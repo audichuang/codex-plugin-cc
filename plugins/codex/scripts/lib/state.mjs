@@ -155,6 +155,54 @@ function normalizeTrackedPid(pidValue) {
   return Math.trunc(pid);
 }
 
+function defaultActivePredicate(stored) {
+  return stored?.status === "queued" || stored?.status === "running";
+}
+
+/**
+ * Atomically transitions a job record guarded by a predicate on its current
+ * persisted state. Reads the per-job JSON, checks the predicate, and only if
+ * it passes writes the patch to both the per-job file and the state.json
+ * index. Because all fs operations here are synchronous the whole
+ * read-check-write sequence cannot interleave with another async writer in
+ * the same process, so two writers aiming at the same job (timeout catch,
+ * dead-PID reconcile, progress updater) cannot clobber each other's metadata.
+ *
+ * `patchOrBuilder` may be a plain object or a function that receives the
+ * currently-stored job and returns the patch to apply.
+ * `predicate` defaults to "status is still active"; callers that need tighter
+ * guards (e.g. PID identity) can pass their own.
+ *
+ * Returns `{ applied, stored, patch }`. `stored` is the persisted record
+ * that was read (useful for callers that want to read log paths or prior
+ * metadata without re-opening the file).
+ */
+export function applyJobPatchIfActive(cwd, jobId, patchOrBuilder, predicate = null) {
+  const jobFile = resolveJobFile(cwd, jobId);
+  let stored;
+  try {
+    stored = readJobFile(jobFile);
+  } catch {
+    return { applied: false, stored: null, patch: null };
+  }
+
+  const check = predicate ?? defaultActivePredicate;
+  if (!check(stored)) {
+    return { applied: false, stored, patch: null };
+  }
+
+  const patch =
+    typeof patchOrBuilder === "function" ? patchOrBuilder(stored) : patchOrBuilder;
+  if (!patch) {
+    return { applied: false, stored, patch: null };
+  }
+
+  writeJobFile(cwd, jobId, { ...stored, ...patch });
+  upsertJob(cwd, { id: jobId, ...patch });
+
+  return { applied: true, stored, patch };
+}
+
 function reconcileDeadPidJobs(cwd, jobs) {
   const deadCandidates = [];
   for (const job of jobs) {
@@ -173,39 +221,34 @@ function reconcileDeadPidJobs(cwd, jobs) {
   const applied = new Map();
 
   for (const { id, pid } of deadCandidates) {
-    const jobFile = resolveJobFile(cwd, id);
-    let stored;
-    try {
-      stored = readJobFile(jobFile);
-    } catch {
-      continue;
-    }
+    const result = applyJobPatchIfActive(
+      cwd,
+      id,
+      () => ({
+        status: "failed",
+        phase: "failed",
+        pid: null,
+        errorMessage: `Worker process PID ${pid} exited without reporting a terminal status; auto-reconciled as failed.`,
+        completedAt,
+        autoReconciled: true,
+        reconciledDeadPid: pid
+      }),
+      (stored) =>
+        defaultActivePredicate(stored) &&
+        // PID identity guard: only overwrite if the persisted PID is still
+        // the one we observed as dead. If the job was re-spawned with a new
+        // PID, or the OS recycled PID to an unrelated process, this fails
+        // and we leave the record alone.
+        normalizeTrackedPid(stored.pid) === pid
+    );
 
-    // Guard 1: skip if persisted state is no longer active (raced with legit completion).
-    if (stored.status !== "running" && stored.status !== "queued") {
-      continue;
-    }
-    // Guard 2: skip if the persisted PID changed (OS recycled PID, or job was re-spawned).
-    if (normalizeTrackedPid(stored.pid) !== pid) {
-      continue;
-    }
+    if (!result.applied) continue;
 
-    const failedPatch = {
-      status: "failed",
-      phase: "failed",
-      pid: null,
-      errorMessage: `Worker process PID ${pid} exited without reporting a terminal status; auto-reconciled as failed.`,
-      completedAt,
-      autoReconciled: true,
-      reconciledDeadPid: pid
-    };
+    applied.set(id, result.patch);
 
-    writeJobFile(cwd, id, { ...stored, ...failedPatch });
-    applied.set(id, { ...failedPatch, updatedAt: completedAt });
-
-    // Also write a human-visible marker into the job log so the next
-    // /codex:status renders something explanatory instead of going silent.
-    const logTarget = stored.logFile ?? null;
+    // Human-visible marker in the job log so the next /codex:status renders
+    // something explanatory in the progress preview instead of going silent.
+    const logTarget = result.stored?.logFile ?? null;
     if (logTarget) {
       try {
         fs.appendFileSync(
@@ -222,13 +265,6 @@ function reconcileDeadPidJobs(cwd, jobs) {
   if (applied.size === 0) {
     return jobs;
   }
-
-  updateState(cwd, (state) => {
-    for (const job of state.jobs) {
-      const patch = applied.get(job.id);
-      if (patch) Object.assign(job, patch);
-    }
-  });
 
   return jobs.map((job) => {
     const patch = applied.get(job.id);

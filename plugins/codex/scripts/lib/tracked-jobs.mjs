@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import process from "node:process";
 
-import { readJobFile, resolveJobFile, resolveJobLogFile, upsertJob, writeJobFile } from "./state.mjs";
+import { applyJobPatchIfActive, resolveJobLogFile, upsertJob, writeJobFile } from "./state.mjs";
 
 export const SESSION_ID_ENV = "CODEX_COMPANION_SESSION_ID";
 export const JOB_TIMEOUT_ENV = "CODEX_JOB_TIMEOUT_MS";
@@ -118,18 +118,12 @@ export function createJobProgressUpdater(workspaceRoot, jobId) {
       return;
     }
 
-    upsertJob(workspaceRoot, patch);
-
-    const jobFile = resolveJobFile(workspaceRoot, jobId);
-    if (!fs.existsSync(jobFile)) {
-      return;
-    }
-
-    const storedJob = readJobFile(jobFile);
-    writeJobFile(workspaceRoot, jobId, {
-      ...storedJob,
-      ...patch
-    });
+    // Suppress progress updates once the job has already reached a terminal
+    // state. Without this, a runner that keeps producing events after the
+    // layer-2 hard timeout rejected Promise.race would race the failure
+    // write (`phase: failed`) back into `phase: investigating`, flicker
+    // `updatedAt`, and pollute the persisted record with stale fields.
+    applyJobPatchIfActive(workspaceRoot, jobId, patch);
   };
 }
 
@@ -148,14 +142,6 @@ export function createProgressReporter({ stderr = false, logFile = null, onEvent
     appendLogBlock(logFile, event.logTitle, event.logBody);
     onEvent?.(event);
   };
-}
-
-function readStoredJobOrNull(workspaceRoot, jobId) {
-  const jobFile = resolveJobFile(workspaceRoot, jobId);
-  if (!fs.existsSync(jobFile)) {
-    return null;
-  }
-  return readJobFile(jobFile);
 }
 
 export async function runTrackedJob(job, runner, options = {}) {
@@ -183,7 +169,9 @@ export async function runTrackedJob(job, runner, options = {}) {
   const timeoutPromise = new Promise((_resolve, reject) => {
     timeoutHandle = setTimeout(() => {
       timedOut = true;
-      reject(new Error(`Tracked job ${job.id} exceeded the ${formatTimeoutHuman(timeoutMs)} hard timeout and was aborted by the runner watchdog.`));
+      reject(new Error(
+        `Tracked job ${job.id} exceeded the ${formatTimeoutHuman(timeoutMs)} hard timeout; the job record was marked failed. The underlying runner was not cancelled and may still be executing in the background — kill it manually if it keeps consuming resources.`
+      ));
     }, timeoutMs);
     timeoutHandle.unref?.();
   });
@@ -225,27 +213,41 @@ export async function runTrackedJob(job, runner, options = {}) {
       timeoutHandle = null;
     }
     const errorMessage = error instanceof Error ? error.message : String(error);
-    const existing = readStoredJobOrNull(job.workspaceRoot, job.id) ?? runningRecord;
     const completedAt = nowIso();
     const failurePatch = {
       status: "failed",
       phase: "failed",
       errorMessage,
       pid: null,
-      completedAt
+      completedAt,
+      ...(timedOut ? { timedOut: true } : {})
     };
-    if (timedOut) {
-      failurePatch.timedOut = true;
+
+    // Route the failure write through the CAS helper so we never clobber a
+    // record that was already transitioned to a terminal state by layer-3
+    // dead-PID reconciliation (e.g. another companion observed this PID as
+    // dead first). If the record is still active, we write atomically.
+    const result = applyJobPatchIfActive(
+      job.workspaceRoot,
+      job.id,
+      (existing) => ({
+        ...failurePatch,
+        logFile: options.logFile ?? job.logFile ?? existing.logFile ?? null
+      })
+    );
+
+    // Defensive fallback: if the per-job file somehow went missing between
+    // runningRecord write and now, the helper returns applied=false with
+    // stored=null. Fall back to a direct write so the job does not silently
+    // disappear.
+    if (!result.applied && result.stored === null) {
+      writeJobFile(job.workspaceRoot, job.id, {
+        ...runningRecord,
+        ...failurePatch,
+        logFile: options.logFile ?? job.logFile ?? runningRecord.logFile ?? null
+      });
+      upsertJob(job.workspaceRoot, { id: job.id, ...failurePatch });
     }
-    writeJobFile(job.workspaceRoot, job.id, {
-      ...existing,
-      ...failurePatch,
-      logFile: options.logFile ?? job.logFile ?? existing.logFile ?? null
-    });
-    upsertJob(job.workspaceRoot, {
-      id: job.id,
-      ...failurePatch
-    });
     throw error;
   }
 }

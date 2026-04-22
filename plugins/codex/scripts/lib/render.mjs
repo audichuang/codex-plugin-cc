@@ -127,7 +127,8 @@ function pushJobDetails(lines, job, options = {}) {
     const pidSuffix = job.reconciledDeadPid ? ` (PID ${job.reconciledDeadPid})` : "";
     lines.push(`  ! Auto-reconciled as failed: worker process${pidSuffix} exited without reporting.`);
   } else if (job.timedOut) {
-    lines.push(`  ! Hard timeout: runner watchdog aborted the job after exceeding the configured duration.`);
+    lines.push(`  ! Hard timeout: job marked failed after exceeding the configured duration.`);
+    lines.push(`    The underlying runner was not cancelled and may still be executing in the background.`);
     if (job.errorMessage) {
       lines.push(`  Error: ${job.errorMessage}`);
     }
