@@ -169,7 +169,7 @@ test("applyJobPatchIfActive skips writes when the job is already terminal", () =
   assert.equal(persisted.errorMessage, undefined);
 });
 
-test("applyJobPatchIfActive honours a caller-supplied predicate (PID identity guard)", () => {
+test("applyJobPatchIfActive runs extraGuard in addition to the built-in active-state check", () => {
   const workspace = makeTempDir();
   const job = seedActiveJob(workspace, { id: "task-pid-guard", pid: 99001 });
 
@@ -194,6 +194,37 @@ test("applyJobPatchIfActive honours a caller-supplied predicate (PID identity gu
   const persisted = JSON.parse(fs.readFileSync(resolveJobFile(workspace, "task-pid-guard"), "utf8"));
   assert.equal(persisted.status, "running");
   assert.equal(persisted.errorMessage, undefined);
+});
+
+test("applyJobPatchIfActive never bypasses the active-state check even if extraGuard returns true for a terminal record", () => {
+  const workspace = makeTempDir();
+  seedActiveJob(workspace, { id: "task-terminal-extra", status: "failed" });
+
+  const result = applyJobPatchIfActive(
+    workspace,
+    "task-terminal-extra",
+    { status: "completed", errorMessage: "would overwrite" },
+    () => true // extraGuard says yes, but the built-in gate must still veto
+  );
+  assert.equal(result.applied, false);
+
+  const persisted = JSON.parse(fs.readFileSync(resolveJobFile(workspace, "task-terminal-extra"), "utf8"));
+  assert.equal(persisted.status, "failed");
+});
+
+test("applyJobPatchIfActive stamps updatedAt on every applied patch", () => {
+  const workspace = makeTempDir();
+  const job = seedActiveJob(workspace, { id: "task-updated-at" });
+  const before = new Date().toISOString();
+
+  const result = applyJobPatchIfActive(workspace, job.id, { phase: "verifying" });
+
+  assert.equal(result.applied, true);
+  assert.ok(result.patch.updatedAt, "returned patch must include updatedAt");
+  assert.ok(result.patch.updatedAt >= before, "updatedAt must be recent");
+
+  const persisted = JSON.parse(fs.readFileSync(resolveJobFile(workspace, job.id), "utf8"));
+  assert.equal(persisted.updatedAt, result.patch.updatedAt);
 });
 
 test("applyJobPatchIfActive returns applied=false when the per-job file is missing", () => {

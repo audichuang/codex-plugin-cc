@@ -160,24 +160,29 @@ function defaultActivePredicate(stored) {
 }
 
 /**
- * Atomically transitions a job record guarded by a predicate on its current
- * persisted state. Reads the per-job JSON, checks the predicate, and only if
- * it passes writes the patch to both the per-job file and the state.json
+ * Atomically transitions a job record. Reads the per-job JSON, verifies the
+ * job is still in an active status (queued/running), optionally runs an
+ * `extraGuard` for stricter checks (e.g. PID identity), and only if ALL
+ * gates pass writes the patch to both the per-job file and the state.json
  * index. Because all fs operations here are synchronous the whole
  * read-check-write sequence cannot interleave with another async writer in
- * the same process, so two writers aiming at the same job (timeout catch,
- * dead-PID reconcile, progress updater) cannot clobber each other's metadata.
+ * the same process, so timeout catch, dead-PID reconcile, and progress
+ * updates cannot clobber each other's metadata within one Node process.
  *
- * `patchOrBuilder` may be a plain object or a function that receives the
- * currently-stored job and returns the patch to apply.
- * `predicate` defaults to "status is still active"; callers that need tighter
- * guards (e.g. PID identity) can pass their own.
+ * The active-state gate ALWAYS runs — callers cannot bypass it. `extraGuard`
+ * is an additional check on top of it. This prevents a future caller from
+ * accidentally widening the helper past terminal-state protection.
+ *
+ * `patchOrBuilder` may be a plain object or a function receiving the stored
+ * job that returns the patch. Return `null`/`undefined`/`false` from the
+ * builder to skip the write (useful when the stored state already matches).
  *
  * Returns `{ applied, stored, patch }`. `stored` is the persisted record
- * that was read (useful for callers that want to read log paths or prior
- * metadata without re-opening the file).
+ * that was read (useful for reading log paths or prior metadata without
+ * reopening the file). `patch` is what was actually written, including the
+ * `updatedAt` timestamp the helper stamps on the index.
  */
-export function applyJobPatchIfActive(cwd, jobId, patchOrBuilder, predicate = null) {
+export function applyJobPatchIfActive(cwd, jobId, patchOrBuilder, extraGuard = null) {
   const jobFile = resolveJobFile(cwd, jobId);
   let stored;
   try {
@@ -186,16 +191,21 @@ export function applyJobPatchIfActive(cwd, jobId, patchOrBuilder, predicate = nu
     return { applied: false, stored: null, patch: null };
   }
 
-  const check = predicate ?? defaultActivePredicate;
-  if (!check(stored)) {
+  if (!defaultActivePredicate(stored)) {
+    return { applied: false, stored, patch: null };
+  }
+  if (extraGuard && !extraGuard(stored)) {
     return { applied: false, stored, patch: null };
   }
 
-  const patch =
+  const rawPatch =
     typeof patchOrBuilder === "function" ? patchOrBuilder(stored) : patchOrBuilder;
-  if (!patch) {
+  if (!rawPatch) {
     return { applied: false, stored, patch: null };
   }
+
+  const updatedAt = nowIso();
+  const patch = { ...rawPatch, updatedAt };
 
   writeJobFile(cwd, jobId, { ...stored, ...patch });
   upsertJob(cwd, { id: jobId, ...patch });
@@ -233,13 +243,11 @@ function reconcileDeadPidJobs(cwd, jobs) {
         autoReconciled: true,
         reconciledDeadPid: pid
       }),
-      (stored) =>
-        defaultActivePredicate(stored) &&
-        // PID identity guard: only overwrite if the persisted PID is still
-        // the one we observed as dead. If the job was re-spawned with a new
-        // PID, or the OS recycled PID to an unrelated process, this fails
-        // and we leave the record alone.
-        normalizeTrackedPid(stored.pid) === pid
+      // Active-state check runs first inside the helper; this extra guard
+      // enforces PID identity. If the persisted PID no longer matches the
+      // one we observed as dead (job re-spawned with a new PID, or OS
+      // recycled the PID to an unrelated process), reconcile skips.
+      (stored) => normalizeTrackedPid(stored.pid) === pid
     );
 
     if (!result.applied) continue;

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { renderReviewResult, renderStoredJobResult } from "../plugins/codex/scripts/lib/render.mjs";
+import { renderJobStatusReport, renderReviewResult, renderStoredJobResult } from "../plugins/codex/scripts/lib/render.mjs";
 
 test("renderReviewResult degrades gracefully when JSON is missing required review fields", () => {
   const output = renderReviewResult(
@@ -56,4 +56,44 @@ test("renderStoredJobResult prefers rendered output for structured review jobs",
   assert.doesNotMatch(output, /^\{/);
   assert.match(output, /Codex session ID: thr_123/);
   assert.match(output, /Resume in Codex: codex resume thr_123/);
+});
+
+test("renderJobStatusReport surfaces timedOut jobs without the misleading 'aborted' wording", () => {
+  const output = renderJobStatusReport({
+    id: "task-timeout-render",
+    status: "failed",
+    phase: "failed",
+    timedOut: true,
+    title: "Long-running task",
+    errorMessage:
+      "Tracked job task-timeout-render exceeded the 15m hard timeout; the job record was marked failed. The underlying runner was not cancelled and may still be executing in the background — kill it manually if it keeps consuming resources.",
+    duration: "15m 1s",
+    jobClass: "task",
+    kindLabel: "rescue"
+  });
+
+  // New wording must be present
+  assert.match(output, /Hard timeout: job marked failed after exceeding the configured duration\./);
+  assert.match(output, /underlying runner was not cancelled and may still be executing/);
+  // Misleading wording from the prior version must NOT be present
+  assert.doesNotMatch(output, /runner watchdog aborted the job/);
+  // Error message must still be rendered
+  assert.match(output, /Error: Tracked job task-timeout-render exceeded the 15m hard timeout/);
+});
+
+test("renderJobStatusReport surfaces autoReconciled jobs with PID context", () => {
+  const output = renderJobStatusReport({
+    id: "task-zombie-render",
+    status: "failed",
+    phase: "failed",
+    autoReconciled: true,
+    reconciledDeadPid: 90016,
+    title: "Dead companion",
+    errorMessage: "Worker process PID 90016 exited without reporting a terminal status; auto-reconciled as failed.",
+    duration: "13m 36s",
+    jobClass: "task",
+    kindLabel: "rescue"
+  });
+
+  assert.match(output, /Auto-reconciled as failed: worker process \(PID 90016\) exited without reporting\./);
 });
