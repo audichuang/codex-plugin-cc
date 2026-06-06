@@ -46,6 +46,43 @@ test("gatherObservation derives liveness signals from the job record and deps", 
   assert.deepEqual(obs.thresholds, { hangQuietMs: 900_000 });
 });
 
+test("gatherObservation flags missedOwnDeadline when now is past the job's timeoutAt", async () => {
+  const deps = {
+    readJob: () => ({
+      status: "running",
+      pid: 4242,
+      logFile: "/tmp/x.log",
+      timeoutAt: new Date(1_000_000).toISOString()
+    }),
+    isProcessAlive: () => true,
+    statLogMtimeMs: () => 1_000_000,
+    probeBroker: async () => true,
+    now: () => 5_000_000 // well past timeoutAt
+  };
+  const obs = await gatherObservation("/ws", "job-late", deps, CONFIG);
+  assert.equal(obs.missedOwnDeadline, true);
+});
+
+test("gatherObservation does not flag missedOwnDeadline before the deadline (or when absent)", async () => {
+  const withFutureDeadline = {
+    readJob: () => ({ status: "running", pid: 1, logFile: "/tmp/x.log", timeoutAt: new Date(9_000_000).toISOString() }),
+    isProcessAlive: () => true,
+    statLogMtimeMs: () => 1000,
+    probeBroker: async () => true,
+    now: () => 1000
+  };
+  assert.equal((await gatherObservation("/ws", "j", withFutureDeadline, CONFIG)).missedOwnDeadline, false);
+
+  const noDeadline = {
+    readJob: () => ({ status: "running", pid: 1, logFile: "/tmp/x.log" }),
+    isProcessAlive: () => true,
+    statLogMtimeMs: () => 1000,
+    probeBroker: async () => true,
+    now: () => 9_999_999
+  };
+  assert.equal((await gatherObservation("/ws", "j", noDeadline, CONFIG)).missedOwnDeadline, false);
+});
+
 test("gatherObservation returns null when the job record is gone", async () => {
   const obs = await gatherObservation("/ws", "missing", { readJob: () => null }, CONFIG);
   assert.equal(obs, null);

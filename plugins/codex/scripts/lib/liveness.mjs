@@ -18,19 +18,27 @@ const TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled"]);
  *
  * - DONE    — the job already reached a terminal state; the watchdog can stop.
  * - DEAD    — the worker process is gone but the job never reached terminal.
- * - HUNG    — alive but silent past the soft threshold AND the broker is
- *             unreachable. Silence alone is never fatal: a reachable broker
- *             does not prove progress, but the worker's own hard timeout owns
- *             the hung-but-alive case, so the watchdog must not false-kill a
- *             slow-but-working turn on silence alone.
+ * - HUNG    — alive but EITHER it blew past its own declared hard-timeout
+ *             deadline (its in-process timeout should have fired but didn't —
+ *             the event-loop-wedged case), OR it is silent past the soft
+ *             threshold AND the broker is unreachable. Silence with a reachable
+ *             broker is never fatal on its own: a reachable broker does not
+ *             prove progress, so the watchdog must not false-kill a
+ *             slow-but-working turn that is still within its budget.
  * - HEALTHY — anything else.
  */
-export function classifyLiveness({ status, workerAlive, quietMs, brokerOk, thresholds } = {}) {
+export function classifyLiveness({ status, workerAlive, quietMs, brokerOk, missedOwnDeadline, thresholds } = {}) {
   if (TERMINAL_STATUSES.has(status)) {
     return "DONE";
   }
   if (!workerAlive) {
     return "DEAD";
+  }
+  // The worker failed to honour its own hard timeout (it would otherwise have
+  // marked itself failed by now). This only triggers past the job's declared
+  // deadline, so it never kills a turn that is still working within its budget.
+  if (missedOwnDeadline) {
+    return "HUNG";
   }
   const hangQuietMs = thresholds?.hangQuietMs ?? DEFAULTS.hangQuietMs;
   if (quietMs > hangQuietMs && !brokerOk) {

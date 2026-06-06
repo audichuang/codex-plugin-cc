@@ -206,6 +206,21 @@ export async function runTrackedJob(job, runner, options = {}) {
     }
     const completionStatus = execution.exitStatus === 0 ? "completed" : "failed";
     const completedAt = nowIso();
+
+    // Reverse-race guard: if an external actor (watchdog / dead-PID reconcile)
+    // already moved this job to a terminal state, do not resurrect it back to
+    // "completed" nor clobber its terminal .done signal. The first terminal
+    // writer wins. We still return the execution to the caller.
+    let storedNow = null;
+    try {
+      storedNow = readJobFile(resolveJobFile(job.workspaceRoot, job.id));
+    } catch {
+      storedNow = null;
+    }
+    if (storedNow && storedNow.status !== "running" && storedNow.status !== "queued") {
+      return execution;
+    }
+
     writeJobFile(job.workspaceRoot, job.id, {
       ...runningRecord,
       status: completionStatus,

@@ -128,7 +128,20 @@ I/O 邊界（`process.kill`、`fs.stat`、probe、`spawn`）一律以可注入 d
 - **跳過 protocol-drift（加 `requestAttestation:false` / 移除 `experimental_raw_events`）**：在 `codex-rs/app-server-protocol/src/protocol/v1.rs` 與 `v2/thread.rs` 確認這兩個欄位都標了 `#[serde(default)]`，server 端省略即反序列化為 `false`。所以本 repo 省略它們**本來就等同送 false**，補上是 no-op、不是漂移修復；亂加反而多餘，故不動。
 - **跳過 inferred-completion 在 `phase` 缺失時的強化**：那是次要 fallback，主完成路徑 `turn/completed`（Codex 對中止/失敗也會發）正常運作，且已被三層（transport watchdog / 15m hard timeout / 5m watchdog）兜底。改 `captureTurn` 狀態機風險高、邊際價值低，故維持現狀。
 
-其餘 G0–G4 與 G5 的 request() timeout、session-end surfacing 全數依設計完成，全程 TDD，`node --test` 153 passing。
+其餘 G0–G4 與 G5 的 request() timeout、session-end surfacing 全數依設計完成，全程 TDD。
+
+### Code review 後第二輪複驗（8-agent workflow）的強化
+
+對抗式複驗確認 6 個 review 修正全部成立、測試 meaningful，並額外發現並修正：
+
+- **補回 BLOCKER 1 移除 hard-ceiling 後的殘留 gap**：watchdog 改用 job 自身的 `timeoutAt` 偵測「worker 過了自己宣告的 deadline 仍未自我了結」（event-loop 卡死的情況），`gatherObservation` 算 `missedOwnDeadline`（過期 + 60s grace），`classifyLiveness` 據此判 HUNG。因為以 job 自己的 deadline 為界，**絕不誤殺仍在預算內工作的 turn**，同時封住「卡死但 broker 可達」對所有層都漏接的洞。
+- **success-path 反向 race guard**：`runTrackedJob` 成功分支寫終結記錄前先檢查 job 是否已被外部（watchdog/reconcile）標為 terminal；若是則不覆寫、不寫 completed signal（first-terminal-writer-wins），仍回傳 execution。
+
+明確記錄、暫不處理（低機率、且屬既有架構）：
+- **cancel path TOCTOU**：`handleCancel` 選取已過濾 active，但選取到寫入間若 job 轉 terminal，'cancelled' 可能覆寫真正終結態。非-CAS 終結寫入為既有行為；難寫出決定性測試，依「不加未測程式碼」原則暫記為已知低機率 race。
+- **`.done` 非原子寫入（torn read）**：payload 目前不被讀取（monitor 只看存在性、`/codex:result` 讀權威 per-job JSON），YAGNI 暫不加 tmp+rename。
+
+最終 `node --test` 165 passing。
 
 ## 明確不要做
 

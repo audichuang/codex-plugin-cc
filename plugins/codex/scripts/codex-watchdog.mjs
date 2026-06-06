@@ -25,6 +25,10 @@ import {
 import { appendLogLine, nowIso } from "./lib/tracked-jobs.mjs";
 import { createLivenessGate, resolveWatchdogConfig } from "./lib/liveness.mjs";
 
+// Margin past a job's own declared hard-timeout deadline before the watchdog
+// treats it as missed — avoids racing the worker's in-process timeout firing.
+const DEADLINE_GRACE_MS = 60_000;
+
 export function makeDefaultDeps() {
   return {
     readJob: (cwd, jobId) => {
@@ -89,12 +93,16 @@ export async function gatherObservation(cwd, jobId, deps, config) {
 
   const brokerOk = Boolean(await deps.probeBroker(cwd));
 
+  const deadlineMs = job.timeoutAt ? Date.parse(job.timeoutAt) : NaN;
+  const missedOwnDeadline = Number.isFinite(deadlineMs) && deps.now() > deadlineMs + DEADLINE_GRACE_MS;
+
   return {
     status: job.status,
     pid: hasPid ? Math.trunc(pid) : null,
     workerAlive,
     quietMs,
     brokerOk,
+    missedOwnDeadline,
     thresholds: { hangQuietMs: config.hangQuietMs },
     threadId: job.threadId ?? null,
     turnId: job.turnId ?? null,

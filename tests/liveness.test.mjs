@@ -72,6 +72,34 @@ test("classifyLiveness stays HEALTHY on long silence while the broker is reachab
   assert.equal(verdict, "HEALTHY");
 });
 
+test("classifyLiveness reports HUNG when an alive worker blew past its own hard-timeout deadline", () => {
+  // Closes the residual gap from removing the silence hard-ceiling: a worker
+  // whose event loop is wedged never fires its own in-process hard timeout, so
+  // the watchdog must catch it via its declared deadline. Reachable broker must
+  // NOT save it here — missing your own deadline is a definitive hang signal.
+  const verdict = classifyLiveness({
+    status: "running",
+    workerAlive: true,
+    quietMs: 1000,
+    brokerOk: true,
+    missedOwnDeadline: true,
+    thresholds: THRESHOLDS
+  });
+  assert.equal(verdict, "HUNG");
+});
+
+test("classifyLiveness stays HEALTHY when the worker is within its own deadline", () => {
+  const verdict = classifyLiveness({
+    status: "running",
+    workerAlive: true,
+    quietMs: 5_000_000,
+    brokerOk: true,
+    missedOwnDeadline: false,
+    thresholds: THRESHOLDS
+  });
+  assert.equal(verdict, "HEALTHY");
+});
+
 test("classifyLiveness stays HEALTHY for a recently-active worker", () => {
   const verdict = classifyLiveness({
     status: "running",
