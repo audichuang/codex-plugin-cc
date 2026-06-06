@@ -15,6 +15,14 @@ export function runCommand(command, args = [], options = {}) {
     // user-controlled value (e.g. a git `--base` ref or a changed-file path)
     // becomes shell injection on Windows. git/codex/taskkill are real
     // executables and resolve fine with shell:false.
+    //
+    // KNOWN LIMITATION (Windows): an npm-installed Codex is a `codex.cmd` shim,
+    // which spawnSync cannot run with shell:false. The correct fix is to detect
+    // .cmd/.bat and invoke them via `cmd.exe /d /s /c` with
+    // windowsVerbatimArguments + our own quoting (the cross-spawn pattern) — NOT
+    // shell:true with an args array. Deferred until it can be validated on
+    // Windows; getting cmd.exe quoting wrong would either break execution or
+    // reintroduce the injection this guards against.
     shell: false,
     windowsHide: true
   });

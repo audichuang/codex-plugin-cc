@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.0.8
+
+- Fix two shared-broker correctness bugs found by a Codex review of 1.0.5–1.0.6:
+  - SessionEnd no longer tears down the broker when it refuses shutdown as busy
+    (`sendBrokerShutdown` now reports busy), so ending one session can't abort
+    another client's in-flight Codex turn.
+  - The liveness watchdog only reaps the broker for a genuine HUNG turn with
+    thread/turn identity, an attempted-but-unconfirmed interrupt, and an
+    unreachable broker — never for a DEAD job, a busy broker, or one still
+    reachable.
+- Harden the terminal-job CAS: the stored===null recreate fallbacks (runner
+  success/failure and cancel) now go through the same O_EXCL claim, and a claim
+  left behind by a crashed owner (dead pid + still-active job) is reclaimable so
+  a job can't wedge un-finalizable.
+- `reapStaleBroker` verifies process identity before escalating to SIGKILL, so a
+  recycled pid (an unrelated process reusing the old broker's pid) is never
+  killed.
+- Document a known Windows limitation: an npm-installed `codex.cmd` shim can't be
+  spawned with shell:false; a cmd.exe-wrapper fix is deferred until it can be
+  validated on Windows.
+
 ## 1.0.7
 
 - Add a `CODEX_SANDBOX_MODE` escape hatch. Codex normally runs commands in its

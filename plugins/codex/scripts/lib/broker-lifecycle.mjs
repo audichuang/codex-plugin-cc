@@ -41,10 +41,18 @@ export async function waitForBrokerEndpoint(endpoint, timeoutMs = 2000) {
   return false;
 }
 
+// Mirrors BROKER_BUSY_RPC_CODE in app-server.mjs. Duplicated here (instead of
+// imported) to avoid an app-server <-> broker-lifecycle import cycle.
+const BROKER_BUSY_RPC_CODE = -32001;
+
+// Returns { busy } — busy:true means the broker refused shutdown because it is
+// still serving another client. The caller must NOT then tear the broker down.
 export async function sendBrokerShutdown(endpoint, timeoutMs = 1500) {
-  await new Promise((resolve) => {
+  return await new Promise((resolve) => {
     const socket = connectToEndpoint(endpoint);
     let settled = false;
+    let busy = false;
+    let buffer = "";
     const done = () => {
       if (settled) {
         return;
@@ -55,7 +63,7 @@ export async function sendBrokerShutdown(endpoint, timeoutMs = 1500) {
       } catch {
         // Best effort.
       }
-      resolve();
+      resolve({ busy });
     };
     socket.setEncoding("utf8");
     // Bound the wait: a broker that connects but never replies (and never
@@ -65,7 +73,27 @@ export async function sendBrokerShutdown(endpoint, timeoutMs = 1500) {
     socket.on("connect", () => {
       socket.write(`${JSON.stringify({ id: 1, method: "broker/shutdown", params: {} })}\n`);
     });
-    socket.on("data", done);
+    socket.on("data", (chunk) => {
+      buffer += chunk;
+      let newlineIndex = buffer.indexOf("\n");
+      while (newlineIndex !== -1) {
+        const line = buffer.slice(0, newlineIndex);
+        buffer = buffer.slice(newlineIndex + 1);
+        newlineIndex = buffer.indexOf("\n");
+        if (!line.trim()) {
+          continue;
+        }
+        try {
+          const message = JSON.parse(line);
+          if (message?.error?.code === BROKER_BUSY_RPC_CODE) {
+            busy = true;
+          }
+        } catch {
+          // Ignore unparsable lines.
+        }
+      }
+      done();
+    });
     socket.on("error", done);
     socket.on("close", done);
   });
@@ -138,6 +166,27 @@ function defaultForceKill(pid) {
   }
 }
 
+// Confirm the pid is still OUR broker before a hard SIGKILL, so a recycled pid
+// (the old broker exited and the OS reassigned its pid) is never killed. Reads
+// /proc/<pid>/cmdline and requires it to be the broker script for this session's
+// endpoint/pidFile. Returns false when identity cannot be established (no /proc
+// on this OS, unreadable, or no match) — caller then leaves the process alone.
+function defaultVerifyBrokerIdentity(pid, session) {
+  let cmdline;
+  try {
+    cmdline = fs.readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0").join(" ");
+  } catch {
+    return false;
+  }
+  if (!cmdline.includes("app-server-broker.mjs")) {
+    return false;
+  }
+  return Boolean(
+    (session?.endpoint && cmdline.includes(session.endpoint)) ||
+      (session?.pidFile && cmdline.includes(session.pidFile))
+  );
+}
+
 // Tear down a stale broker and, if it survives the graceful SIGTERM (its
 // SIGTERM handler runs an async shutdown that can hang), escalate to SIGKILL
 // before a replacement is spawned — otherwise two brokers can run at once.
@@ -145,6 +194,7 @@ export async function reapStaleBroker(session, options = {}) {
   const killProcess = options.killProcess ?? terminateProcessTree;
   const aliveCheck = options.isProcessAlive ?? isProcessAlive;
   const forceKill = options.forceKill ?? defaultForceKill;
+  const verifyIdentity = options.verifyIdentity ?? defaultVerifyBrokerIdentity;
   const sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   const escalateAfterMs = options.escalateAfterMs ?? 500;
 
@@ -168,7 +218,9 @@ export async function reapStaleBroker(session, options = {}) {
     await sleep(step);
     waited += step;
   }
-  if (aliveCheck(pid)) {
+  // Only hard-kill if it is still alive AND still provably our broker — never
+  // SIGKILL a process that merely reused the old pid.
+  if (aliveCheck(pid) && verifyIdentity(pid, session)) {
     forceKill(pid);
   }
 }

@@ -5,6 +5,7 @@ import { terminateProcessTree } from "./process.mjs";
 
 import {
   applyJobPatchIfActive,
+  claimTerminalTransition,
   loadState,
   readJobFile,
   resolveJobFile,
@@ -16,20 +17,15 @@ import {
 
 const TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled"]);
 
-// The stored===null fallbacks below recreate a terminal record when the per-job
-// file vanished (pruned mid-run). That recreate is only safe when no other
-// actor has already finalized the job in the shared index — otherwise a late
-// writer would resurrect a job that first-terminal-writer-wins already decided.
 // Returns the index's terminal status for a job (completed/failed/cancelled),
-// or null when the job is absent or still active. Exported so other terminal
-// writers (e.g. the cancel handler) share one definition of "already decided".
+// or null when the job is absent or still active. Exported so the cancel handler
+// can report the real outcome when it loses the terminal race. The stored===null
+// recreate fallbacks no longer rely on this — they go through the cross-process
+// O_EXCL claim (claimTerminalTransition) so first-terminal-writer-wins holds even
+// when the per-job file was pruned.
 export function indexedTerminalStatus(workspaceRoot, jobId) {
   const entry = loadState(workspaceRoot).jobs.find((job) => job.id === jobId);
   return entry && TERMINAL_STATUSES.has(entry.status) ? entry.status : null;
-}
-
-function indexHasTerminalRecord(workspaceRoot, jobId) {
-  return indexedTerminalStatus(workspaceRoot, jobId) !== null;
 }
 
 // Lazy import so this module never statically depends on the heavy app-server
@@ -262,11 +258,15 @@ export async function runTrackedJob(job, runner, options = {}) {
     // vanished (pruned while a silent long job was still alive), the CAS reads
     // stored===null and does not apply. Recreate the terminal record directly
     // so a successful run is not silently dropped — keeping the index light.
-    // BUT only if no other actor already finalized the job in the index while
-    // the per-job file was gone; otherwise first-terminal-writer-wins and we
-    // must not resurrect their terminal state.
+    // BUT only if no other actor already finalized the job; the recreate goes
+    // through the SAME cross-process O_EXCL terminal claim as the normal path,
+    // so two pruned-file recreaters (e.g. runner success vs cancel/watchdog)
+    // cannot both write a terminal record — first-terminal-writer-wins holds.
     const recreateSuccess =
-      !result.applied && result.stored === null && !indexHasTerminalRecord(job.workspaceRoot, job.id);
+      !result.applied &&
+      result.stored === null &&
+      !indexedTerminalStatus(job.workspaceRoot, job.id) &&
+      claimTerminalTransition(job.workspaceRoot, job.id, completionStatus, completedAt);
     if (recreateSuccess) {
       writeJobFile(job.workspaceRoot, job.id, {
         ...runningRecord,
@@ -357,10 +357,14 @@ export async function runTrackedJob(job, runner, options = {}) {
     // Defensive fallback: if the per-job file somehow went missing between
     // runningRecord write and now, the helper returns applied=false with
     // stored=null. Fall back to a direct write so the job does not silently
-    // disappear — but only if no other actor already finalized it in the index
-    // (first-terminal-writer-wins; do not resurrect their terminal state).
+    // disappear — but only if we win the SAME cross-process terminal claim as the
+    // normal path (first-terminal-writer-wins; do not resurrect another actor's
+    // terminal state).
     const recreateFailure =
-      !result.applied && result.stored === null && !indexHasTerminalRecord(job.workspaceRoot, job.id);
+      !result.applied &&
+      result.stored === null &&
+      !indexedTerminalStatus(job.workspaceRoot, job.id) &&
+      claimTerminalTransition(job.workspaceRoot, job.id, "failed", completedAt);
     if (recreateFailure) {
       writeJobFile(job.workspaceRoot, job.id, {
         ...runningRecord,

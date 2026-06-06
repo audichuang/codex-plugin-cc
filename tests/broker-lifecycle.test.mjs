@@ -7,21 +7,38 @@ import assert from "node:assert/strict";
 import { makeTempDir } from "./helpers.mjs";
 import { reapStaleBroker, sendBrokerShutdown, teardownBrokerSession } from "../plugins/codex/scripts/lib/broker-lifecycle.mjs";
 
-test("reapStaleBroker escalates to SIGKILL when a broker ignores SIGTERM", async () => {
+test("reapStaleBroker escalates to SIGKILL when a broker ignores SIGTERM (identity confirmed)", async () => {
   const killed = [];
   const forced = [];
   await reapStaleBroker(
-    { endpoint: null, pidFile: null, logFile: null, sessionDir: null, pid: 4242 },
+    { endpoint: "unix:/tmp/cxc-x/broker.sock", pidFile: null, logFile: null, sessionDir: null, pid: 4242 },
     {
       killProcess: (pid) => killed.push(pid),
       isProcessAlive: () => true, // never dies on the graceful SIGTERM
+      verifyIdentity: () => true, // still our broker
       forceKill: (pid) => forced.push(pid),
       sleep: async () => {},
       escalateAfterMs: 200
     }
   );
   assert.deepEqual(killed, [4242], "the graceful SIGTERM (teardown) is attempted first");
-  assert.deepEqual(forced, [4242], "a broker that survives SIGTERM must be SIGKILLed before a replacement spawns");
+  assert.deepEqual(forced, [4242], "a confirmed-still-alive broker that survives SIGTERM must be SIGKILLed");
+});
+
+test("reapStaleBroker does NOT SIGKILL when the pid can no longer be confirmed as our broker (recycled pid)", async () => {
+  const forced = [];
+  await reapStaleBroker(
+    { endpoint: "unix:/tmp/cxc-x/broker.sock", pid: 4242 },
+    {
+      killProcess: () => {},
+      isProcessAlive: () => true, // something is alive at this pid...
+      verifyIdentity: () => false, // ...but it is NOT our broker (pid was recycled)
+      forceKill: (pid) => forced.push(pid),
+      sleep: async () => {},
+      escalateAfterMs: 200
+    }
+  );
+  assert.deepEqual(forced, [], "must not SIGKILL an unrelated process that reused the broker's old pid");
 });
 
 test("reapStaleBroker does not SIGKILL a broker that exits on SIGTERM", async () => {
@@ -41,6 +58,50 @@ test("reapStaleBroker does not SIGKILL a broker that exits on SIGTERM", async ()
     }
   );
   assert.deepEqual(forced, [], "no SIGKILL once the broker has already exited");
+});
+
+async function withFakeBroker(responder, fn) {
+  const dir = makeTempDir();
+  const sockPath = path.join(dir, "broker.sock");
+  const connections = [];
+  const server = net.createServer((socket) => {
+    connections.push(socket);
+    socket.setEncoding("utf8");
+    socket.on("data", () => {
+      const reply = responder();
+      if (reply !== null) {
+        socket.write(`${JSON.stringify(reply)}\n`);
+      }
+    });
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(sockPath, resolve);
+  });
+  try {
+    return await fn(`unix:${sockPath}`);
+  } finally {
+    for (const socket of connections) {
+      socket.destroy();
+    }
+    await new Promise((resolve) => server.close(resolve));
+  }
+}
+
+test("sendBrokerShutdown reports busy when the broker refuses (shutdown must not tear down a shared broker)", async () => {
+  const result = await withFakeBroker(
+    () => ({ id: 1, error: { code: -32001, message: "Shared Codex broker is busy serving another client; shutdown refused." } }),
+    (endpoint) => sendBrokerShutdown(endpoint, 1000)
+  );
+  assert.equal(result.busy, true);
+});
+
+test("sendBrokerShutdown reports not-busy when the broker acknowledges shutdown", async () => {
+  const result = await withFakeBroker(
+    () => ({ id: 1, result: {} }),
+    (endpoint) => sendBrokerShutdown(endpoint, 1000)
+  );
+  assert.equal(result.busy, false);
 });
 
 test("sendBrokerShutdown resolves within its timeout when the broker accepts but never replies", { timeout: 4000 }, async () => {

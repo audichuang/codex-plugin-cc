@@ -26,6 +26,7 @@ import { binaryAvailable, isProcessAlive, terminateProcessTree } from "./lib/pro
 import { loadPromptTemplate, interpolateTemplate } from "./lib/prompts.mjs";
 import {
   applyJobPatchIfActive,
+  claimTerminalTransition,
   generateJobId,
   getConfig,
   listJobs,
@@ -1026,7 +1027,10 @@ async function handleCancel(argv) {
   // index already records as completed/failed (matches the runner/failure
   // recreate guards — first terminal writer wins).
   const recreatedCancelled =
-    !result.applied && result.stored === null && !indexedTerminalStatus(workspaceRoot, job.id);
+    !result.applied &&
+    result.stored === null &&
+    !indexedTerminalStatus(workspaceRoot, job.id) &&
+    claimTerminalTransition(workspaceRoot, job.id, "cancelled", completedAt);
   if (recreatedCancelled) {
     writeJobFile(workspaceRoot, job.id, { ...existing, ...job, ...cancelPatch });
     upsertJob(workspaceRoot, { id: job.id, ...cancelPatch });

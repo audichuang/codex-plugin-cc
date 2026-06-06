@@ -193,27 +193,68 @@ function defaultActivePredicate(stored) {
   return stored?.status === "queued" || stored?.status === "running";
 }
 
+// True only when an existing .lock is stale: its owner process is gone AND the
+// per-job record is still active (the previous claimer crashed after creating
+// the lock but before writing the terminal record). A finalized job legitimately
+// keeps its lock, so we never reclaim once the per-job record is terminal. An
+// unreadable/legacy lock (no recoverable owner pid) is treated as NOT stale —
+// safer to refuse the claim than to risk stealing a live one.
+function isStaleTerminalClaim(cwd, jobId, lockFile) {
+  let ownerPid = null;
+  try {
+    ownerPid = normalizeTrackedPid(JSON.parse(fs.readFileSync(lockFile, "utf8")).pid);
+  } catch {
+    return false;
+  }
+  if (ownerPid === null || isProcessAlive(ownerPid)) {
+    return false;
+  }
+  let stored;
+  try {
+    stored = readJobFile(resolveJobFile(cwd, jobId));
+  } catch {
+    return false;
+  }
+  return defaultActivePredicate(stored);
+}
+
 // Cross-process CAS for a job's terminal transition. The first process to
 // atomically create the per-job .lock (O_CREAT | O_EXCL) wins and may write the
 // terminal record; a racing writer in another process gets EEXIST and returns
-// false, so two processes can never both finalize the same job. Returns true if
-// this process won the claim.
-function claimTerminalTransition(cwd, jobId, status, stamp) {
+// false, so two processes can never both finalize the same job. The lock records
+// the owner pid so a claim left behind by a CRASHED owner (dead pid + job still
+// active) can be reclaimed instead of wedging the job forever. Returns true if
+// this process won the claim. Exported so the recreate fallbacks (per-job file
+// pruned mid-run) go through the same CAS instead of writing terminal records
+// unguarded.
+export function claimTerminalTransition(cwd, jobId, status, stamp) {
   const lockFile = resolveJobLockFile(cwd, jobId);
-  try {
-    const fd = fs.openSync(lockFile, "wx");
+  const payload = `${JSON.stringify({ status, stamp, pid: process.pid })}\n`;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
-      fs.writeSync(fd, `${status} ${stamp}\n`);
-    } finally {
-      fs.closeSync(fd);
-    }
-    return true;
-  } catch (error) {
-    if (error?.code === "EEXIST") {
+      const fd = fs.openSync(lockFile, "wx");
+      try {
+        fs.writeSync(fd, payload);
+      } finally {
+        fs.closeSync(fd);
+      }
+      return true;
+    } catch (error) {
+      if (error?.code !== "EEXIST") {
+        throw error;
+      }
+      if (attempt === 0 && isStaleTerminalClaim(cwd, jobId, lockFile)) {
+        try {
+          fs.unlinkSync(lockFile);
+        } catch {
+          // Lost the unlink race to another reclaimer; fall through to retry/EEXIST.
+        }
+        continue;
+      }
       return false;
     }
-    throw error;
   }
+  return false;
 }
 
 /**

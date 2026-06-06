@@ -288,7 +288,9 @@ test("terminateHungJob escalates to terminating the broker when the interrupt do
     terminate: (pid) => calls.terminate.push(pid),
     readBrokerPid: () => 54_321
   };
-  const observation = { status: "running", pid: 999_999, threadId: "th", turnId: "tn", logFile };
+  // HUNG with both ids, interrupt attempted-but-unconfirmed, and the broker
+  // confirmed unreachable: this is the only case where reaping the broker is safe.
+  const observation = { status: "running", pid: 999_999, threadId: "th", turnId: "tn", brokerOk: false, logFile };
 
   await terminateHungJob(workspace, jobId, observation, deps, "HUNG");
 
@@ -297,6 +299,44 @@ test("terminateHungJob escalates to terminating the broker when the interrupt do
     calls.terminate.includes(54_321),
     "must escalate to the broker when the courtesy interrupt did not confirm (the turn runs in the broker's app-server child)"
   );
+});
+
+test("terminateHungJob does NOT reap the broker for a DEAD verdict (no turn to reap)", async () => {
+  const workspace = makeTempDir();
+  const jobId = "job-dead-noreap";
+  const logFile = seedHungJob(workspace, jobId, { threadId: null, turnId: null });
+
+  const calls = { terminate: [] };
+  const deps = {
+    interrupt: async () => ({ attempted: false, interrupted: false }),
+    terminate: (pid) => calls.terminate.push(pid),
+    readBrokerPid: () => 54_321 // a broker pid IS available, but must not be killed
+  };
+  const observation = { status: "running", pid: 999_999, threadId: null, turnId: null, brokerOk: false, logFile };
+
+  await terminateHungJob(workspace, jobId, observation, deps, "DEAD");
+
+  assert.deepEqual(calls.terminate, [999_999], "a DEAD job (no turn identity) must not kill the shared broker");
+});
+
+test("terminateHungJob does NOT reap the broker when the broker is still reachable", async () => {
+  const workspace = makeTempDir();
+  const jobId = "job-brokerok";
+  const logFile = seedHungJob(workspace, jobId);
+
+  const calls = { terminate: [] };
+  const deps = {
+    interrupt: async () => ({ attempted: true, interrupted: false, detail: "Shared Codex broker is busy serving another client." }),
+    terminate: (pid) => calls.terminate.push(pid),
+    readBrokerPid: () => 54_321
+  };
+  // Broker reachable + the interrupt failure was a busy refusal → another client
+  // is using the broker; killing it would abort their turn.
+  const observation = { status: "running", pid: 999_999, threadId: "th", turnId: "tn", brokerOk: true, logFile };
+
+  await terminateHungJob(workspace, jobId, observation, deps, "HUNG");
+
+  assert.deepEqual(calls.terminate, [999_999], "a reachable/busy broker must not be reaped");
 });
 
 test("terminateHungJob leaves the broker alone when the interrupt actually confirmed", async () => {

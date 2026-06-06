@@ -160,13 +160,25 @@ export async function terminateHungJob(cwd, jobId, observation, deps, verdict) {
   }
 
   // The hung turn runs inside `codex app-server`, a child of the BROKER's
-  // process group — not the worker's — so terminating the worker tree does not
-  // stop it. The interrupt RPC is the only other lever and, in the
-  // broker-unreachable hang this watchdog exists for, it cannot connect. If the
-  // interrupt did not confirm, escalate by terminating the broker process so
-  // the OS reaps its orphaned app-server turn instead of letting it run on.
+  // process group, so terminating the worker tree does not stop it. The broker
+  // is shared per-workspace, so reaping it is a LAST resort: only do it for a
+  // genuine HUNG turn that we have identity for, where the courtesy interrupt
+  // was attempted but did not confirm AND the broker is unreachable. Skip it for
+  // a DEAD worker (no turn to reap), when we lack thread/turn identity, when the
+  // broker is still reachable, or when the interrupt was merely busy-refused
+  // (another client is mid-turn) — killing the broker there would abort their
+  // turn.
   const interruptConfirmed = Boolean(interruptResult && interruptResult.interrupted);
-  if (!interruptConfirmed && deps.readBrokerPid) {
+  const interruptBusyRefusal = /Shared Codex broker is busy/i.test(interruptResult?.detail ?? "");
+  const shouldReapBroker =
+    verdict === "HUNG" &&
+    Boolean(observation.threadId) &&
+    Boolean(observation.turnId) &&
+    Boolean(interruptResult?.attempted) &&
+    !interruptConfirmed &&
+    observation.brokerOk === false &&
+    !interruptBusyRefusal;
+  if (shouldReapBroker && deps.readBrokerPid) {
     const brokerPid = deps.readBrokerPid(cwd);
     if (Number.isInteger(brokerPid) && brokerPid > 0) {
       deps.terminate(brokerPid);
@@ -174,7 +186,7 @@ export async function terminateHungJob(cwd, jobId, observation, deps, verdict) {
         try {
           appendLogLine(
             observation.logFile,
-            `Watchdog: turn interrupt unconfirmed; terminated broker process ${brokerPid} to reap the orphaned app-server turn.`
+            `Watchdog: turn interrupt unconfirmed and broker unreachable; terminated broker process ${brokerPid} to reap the orphaned app-server turn.`
           );
         } catch {
           // Logging is best effort.

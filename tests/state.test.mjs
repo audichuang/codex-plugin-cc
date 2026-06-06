@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import { makeTempDir } from "./helpers.mjs";
 import {
   applyJobPatchIfActive,
+  claimTerminalTransition,
   listJobs,
   readJobFile,
   resolveJobFile,
@@ -17,6 +18,51 @@ import {
   saveState,
   writeJobFile
 } from "../plugins/codex/scripts/lib/state.mjs";
+
+const DEAD_PID = 2147483646; // above PID_MAX on Linux/macOS — never a live process
+
+test("claimTerminalTransition reclaims a stale lock whose owner died before finalizing", () => {
+  const workspace = makeTempDir();
+  const jobId = "job-stale-lock";
+  // Per-job record is still active (the previous claimer crashed before writing
+  // the terminal record), and the lock is owned by a dead pid.
+  writeJobFile(workspace, jobId, { id: jobId, status: "running", phase: "running", pid: null });
+  fs.writeFileSync(resolveJobLockFile(workspace, jobId), `${JSON.stringify({ status: "failed", pid: DEAD_PID })}\n`, "utf8");
+
+  const won = claimTerminalTransition(workspace, jobId, "failed", "2026-01-01T00:00:00.000Z");
+
+  assert.equal(won, true, "a stale claim (dead owner + still-active job) must be reclaimable");
+  const lock = JSON.parse(fs.readFileSync(resolveJobLockFile(workspace, jobId), "utf8"));
+  assert.equal(lock.pid, process.pid, "the reclaimed lock is now owned by this process");
+});
+
+test("claimTerminalTransition does not reclaim a lock held by a live owner", () => {
+  const workspace = makeTempDir();
+  const jobId = "job-live-lock";
+  writeJobFile(workspace, jobId, { id: jobId, status: "running", phase: "running", pid: null });
+  fs.writeFileSync(resolveJobLockFile(workspace, jobId), `${JSON.stringify({ status: "failed", pid: process.pid })}\n`, "utf8");
+
+  assert.equal(
+    claimTerminalTransition(workspace, jobId, "failed", "2026-01-01T00:00:00.000Z"),
+    false,
+    "a live owner's claim must not be stolen"
+  );
+});
+
+test("claimTerminalTransition does not reclaim when the job already finalized (terminal record keeps its lock)", () => {
+  const workspace = makeTempDir();
+  const jobId = "job-final-lock";
+  // Owner is dead, BUT the per-job record is already terminal — the previous
+  // claimer DID finalize; its lock must stand.
+  writeJobFile(workspace, jobId, { id: jobId, status: "completed", phase: "done", pid: null });
+  fs.writeFileSync(resolveJobLockFile(workspace, jobId), `${JSON.stringify({ status: "completed", pid: DEAD_PID })}\n`, "utf8");
+
+  assert.equal(
+    claimTerminalTransition(workspace, jobId, "failed", "2026-01-01T00:00:00.000Z"),
+    false,
+    "a finalized job's lock must not be reclaimed even if the owner is gone"
+  );
+});
 
 test("applyJobPatchIfActive wins the cross-process terminal CAS and records an O_EXCL claim", () => {
   const workspace = makeTempDir();

@@ -126,26 +126,32 @@ async function handleSessionEnd(input) {
   const sessionDir = brokerSession?.sessionDir ?? null;
   const pid = brokerSession?.pid ?? null;
 
+  let shutdownResult = { busy: false };
   try {
     if (brokerEndpoint) {
-      await sendBrokerShutdown(brokerEndpoint);
+      shutdownResult = await sendBrokerShutdown(brokerEndpoint);
     }
   } finally {
-    // Always tear down — even if the graceful shutdown RPC threw — so we never
-    // leak the broker process, its temp files, or a stale broker.json that the
-    // next session would try to reuse. (The shutdown RPC is now time-bounded, so
-    // this also cannot sit behind an unbounded await and miss the 5s hook
-    // timeout.)
+    // This session's jobs end regardless.
     cleanupSessionJobs(cwd, input.session_id || process.env[SESSION_ID_ENV]);
-    teardownBrokerSession({
-      endpoint: brokerEndpoint,
-      pidFile,
-      logFile,
-      sessionDir,
-      pid,
-      killProcess: terminateProcessTree
-    });
-    clearBrokerSession(cwd);
+
+    // Only tear the broker down if it did NOT refuse as busy. The broker is
+    // shared per-workspace; if another session/client is mid-turn it returns a
+    // busy error, and force-killing it here would abort that client's turn (the
+    // busy-gate in broker/shutdown would otherwise be defeated by this teardown).
+    // A timeout/other failure leaves shutdownResult.busy false, so a genuinely
+    // wedged broker is still reaped rather than leaked.
+    if (!shutdownResult.busy) {
+      teardownBrokerSession({
+        endpoint: brokerEndpoint,
+        pidFile,
+        logFile,
+        sessionDir,
+        pid,
+        killProcess: terminateProcessTree
+      });
+      clearBrokerSession(cwd);
+    }
   }
 }
 
