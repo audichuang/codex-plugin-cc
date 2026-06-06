@@ -8,6 +8,7 @@ import {
   resolveJobFile,
   resolveJobLogFile,
   saveState,
+  writeCompletionSignalFile,
   writeJobFile
 } from "../plugins/codex/scripts/lib/state.mjs";
 import {
@@ -42,7 +43,7 @@ test("gatherObservation derives liveness signals from the job record and deps", 
   assert.equal(obs.pid, 4242);
   assert.equal(obs.threadId, "th-1");
   assert.equal(obs.turnId, "tn-1");
-  assert.deepEqual(obs.thresholds, { hangQuietMs: 900_000, hardQuietMs: 1_800_000 });
+  assert.deepEqual(obs.thresholds, { hangQuietMs: 900_000 });
 });
 
 test("gatherObservation returns null when the job record is gone", async () => {
@@ -140,6 +141,44 @@ test("terminateHungJob skips interrupt when there is no thread/turn to interrupt
   assert.equal(calls.interrupt.length, 0);
   assert.deepEqual(calls.terminate, [999_999]);
   assert.equal(JSON.parse(fs.readFileSync(resolveJobFile(workspace, jobId), "utf8")).status, "failed");
+});
+
+test("terminateHungJob is a no-op (no kill, no signal overwrite) when the job already completed", async () => {
+  const workspace = makeTempDir();
+  const jobId = "job-raced";
+  const logFile = resolveJobLogFile(workspace, jobId);
+  const job = {
+    id: jobId,
+    status: "completed",
+    phase: "done",
+    pid: 999_999,
+    logFile,
+    threadId: "th-r",
+    turnId: "tn-r",
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:00.000Z"
+  };
+  writeJobFile(workspace, jobId, job);
+  saveState(workspace, { version: 1, config: { stopReviewGate: false }, jobs: [job] });
+  // A pre-existing completed signal that must not be clobbered.
+  writeCompletionSignalFile(workspace, jobId, { status: "completed" });
+
+  const calls = { interrupt: [], terminate: [] };
+  const deps = {
+    interrupt: async (_cwd, ctx) => calls.interrupt.push(ctx),
+    terminate: (pid) => calls.terminate.push(pid)
+  };
+  const staleObservation = { status: "running", pid: 999_999, threadId: "th-r", turnId: "tn-r", logFile };
+
+  await terminateHungJob(workspace, jobId, staleObservation, deps, "HUNG");
+
+  assert.equal(calls.interrupt.length, 0, "must not interrupt a job that already finished");
+  assert.equal(calls.terminate.length, 0, "must not kill a pid for a job that already finished");
+  assert.equal(
+    JSON.parse(fs.readFileSync(resolveJobDoneFile(workspace, jobId), "utf8")).status,
+    "completed",
+    "must not overwrite the completed signal with failed"
+  );
 });
 
 test("runWatchdog escalates across ticks: one quiet tick, then terminate on the second", async () => {

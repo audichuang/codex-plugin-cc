@@ -21,6 +21,18 @@ class CapturingClient extends AppServerClientBase {
   }
 }
 
+class ThrowingClient extends AppServerClientBase {
+  sendMessage() {
+    throw new Error("send failed");
+  }
+}
+
+test("request rejects and clears the pending entry when sendMessage throws synchronously", async () => {
+  const client = new ThrowingClient("/tmp");
+  await assert.rejects(client.request("thread/list", {}, { timeoutMs: 0 }), /send failed/);
+  assert.equal(client.pending.size, 0, "a failed send must not leave a leaked pending entry");
+});
+
 test("resolveRequestTimeoutMs defaults to 120s and lets 0 disable it", () => {
   assert.equal(resolveRequestTimeoutMs({}), 120_000);
   assert.equal(resolveRequestTimeoutMs({ CODEX_REQUEST_TIMEOUT_MS: "5000" }), 5000);

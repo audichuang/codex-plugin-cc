@@ -38,6 +38,50 @@ test("runTrackedJob interrupts the hung turn when the hard timeout fires", async
   assert.equal(record.timedOut, true);
 });
 
+test("runTrackedJob schedules a process-tree terminate on hard timeout so the worker can exit", async () => {
+  const workspace = makeTempDir();
+  const jobId = "job-timeout-kill";
+  const killed = [];
+
+  await assert.rejects(
+    runTrackedJob(
+      { id: jobId, workspaceRoot: workspace },
+      async () => {
+        await new Promise(() => {}); // hang; no thread recorded, so interrupt is skipped
+      },
+      {
+        timeoutMs: 30,
+        interruptOnTimeout: async () => {},
+        terminateOnTimeout: (pid) => killed.push(pid)
+      }
+    ),
+    /hard timeout/i
+  );
+
+  // The terminate is scheduled on an unref'd macrotask; let it fire.
+  await new Promise((resolve) => setTimeout(resolve, 30));
+
+  assert.equal(killed.length, 1, "a hard timeout should schedule exactly one terminate");
+  assert.equal(killed[0], process.pid, "it terminates the worker process tree (runningRecord.pid)");
+});
+
+test("runTrackedJob does not terminate on a normal (non-timeout) failure", async () => {
+  const workspace = makeTempDir();
+  const killed = [];
+  await assert.rejects(
+    runTrackedJob(
+      { id: "job-plain-noterm", workspaceRoot: workspace },
+      async () => {
+        throw new Error("plain failure");
+      },
+      { timeoutMs: 60_000, terminateOnTimeout: (pid) => killed.push(pid) }
+    ),
+    /plain failure/
+  );
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(killed.length, 0);
+});
+
 test("runTrackedJob does not interrupt on a normal (non-timeout) failure", async () => {
   const workspace = makeTempDir();
   const jobId = "job-plainfail";

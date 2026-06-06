@@ -109,10 +109,12 @@ I/O 邊界（`process.kill`、`fs.stat`、probe、`spawn`）一律以可注入 d
 | 變數 | 預設 | 用途 |
 |---|---|---|
 | `CODEX_WATCHDOG_INTERVAL_MS` | `300000` | watchdog tick 間隔（5 分鐘）|
-| `CODEX_WATCHDOG_HANG_QUIET_MS` | `900000` | 一般 HUNG 的靜默門檻（需 broker 不可達）|
-| `CODEX_WATCHDOG_HARD_QUIET_MS` | `1800000` | 僅憑靜默即判 HUNG 的門檻 |
-| `CODEX_JOB_TIMEOUT_MS` | `900000` | （既有）Layer-2 hard timeout |
+| `CODEX_WATCHDOG_HANG_QUIET_MS` | `900000` | HUNG 的靜默門檻；**僅在 broker 同時不可達時**才判 HUNG（靜默本身不致命）|
+| `CODEX_JOB_TIMEOUT_MS` | `900000` | （既有）Layer-2 hard timeout（hung-but-alive 的主責層）|
+| `CODEX_REQUEST_TIMEOUT_MS` | `120000` | Layer-0 per-call RPC timeout（0 停用）|
 | `CODEX_BROKER_IDLE_TIMEOUT_MS` | `5000` | broker 無 client 後自動退出 |
+
+> **Code review 後修正（BLOCKER 1）**：移除原本「僅憑靜默超過 `HARD_QUIET_MS` 即殺」的分支。理由：broker 是獨立進程，codex 卡死時 broker 仍可達，故「靜默 + broker 可達」無法區分卡死與慢但正常；且 hung-but-alive 已由 worker 自身的 Layer-2 hard timeout 兜底。watchdog 因此只在 `DEAD`（worker 不在）或 `靜默 + broker 不可達` 才動手，徹底避免誤殺。
 
 ## 交付與後續
 

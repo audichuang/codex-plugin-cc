@@ -262,6 +262,14 @@ function reconcileDeadPidJobs(cwd, jobs) {
 
     applied.set(id, result.patch);
 
+    // Emit the terminal signal so a monitor waiting on <jobId>.done wakes, and
+    // so the watchdog (which sees this job as already terminal) does not exit
+    // leaving the signal unwritten.
+    writeCompletionSignalFile(cwd, id, {
+      status: "failed",
+      reason: `Worker process PID ${pid} exited without reporting a terminal status; auto-reconciled as failed.`
+    });
+
     // Human-visible marker in the job log so the next /codex:status renders
     // something explanatory in the progress preview instead of going silent.
     const logTarget = result.stored?.logFile ?? null;

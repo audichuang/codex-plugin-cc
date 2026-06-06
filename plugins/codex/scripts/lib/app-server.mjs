@@ -121,7 +121,17 @@ export class AppServerClientBase {
         entry.timer.unref?.();
       }
       this.pending.set(id, entry);
-      this.sendMessage({ id, method, params });
+      try {
+        this.sendMessage({ id, method, params });
+      } catch (error) {
+        // A synchronous transport failure must not leave a leaked pending entry
+        // (and armed timer) behind.
+        this.pending.delete(id);
+        if (entry.timer) {
+          clearTimeout(entry.timer);
+        }
+        reject(error);
+      }
     });
   }
 

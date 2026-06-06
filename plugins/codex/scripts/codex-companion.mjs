@@ -31,6 +31,7 @@ import {
   resolveJobDoneFile,
   setConfig,
   upsertJob,
+  writeCompletionSignalFile,
   writeJobFile
 } from "./lib/state.mjs";
 import {
@@ -994,6 +995,13 @@ async function handleCancel(argv) {
     pid: null,
     errorMessage: "Cancelled by user.",
     completedAt
+  });
+  // Terminal signal so a monitor waiting on <jobId>.done wakes after a user
+  // cancellation (the watchdog also exits on terminal state, so it cannot
+  // backfill this signal).
+  writeCompletionSignalFile(workspaceRoot, job.id, {
+    status: "cancelled",
+    reason: "Cancelled by user."
   });
 
   const payload = {

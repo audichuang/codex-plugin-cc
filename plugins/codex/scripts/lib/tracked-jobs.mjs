@@ -1,6 +1,8 @@
 import fs from "node:fs";
 import process from "node:process";
 
+import { terminateProcessTree } from "./process.mjs";
+
 import {
   applyJobPatchIfActive,
   readJobFile,
@@ -302,6 +304,25 @@ export async function runTrackedJob(job, runner, options = {}) {
       status: "failed",
       reason: errorMessage
     });
+
+    // On a hard timeout the runner is still pending and holding open handles
+    // (the broker socket), which can keep this process from exiting even after
+    // it reported failure. Schedule a process-tree terminate; .unref() means it
+    // only fires if the loop is otherwise blocked (i.e. genuinely stuck), so a
+    // process that can exit cleanly still does.
+    if (timedOut) {
+      const terminate = options.terminateOnTimeout ?? terminateProcessTree;
+      const pid = Number(result.stored?.pid ?? runningRecord.pid);
+      if (Number.isFinite(pid) && pid > 0) {
+        setTimeout(() => {
+          try {
+            terminate(pid);
+          } catch {
+            // Already gone.
+          }
+        }, 0).unref?.();
+      }
+    }
     throw error;
   }
 }

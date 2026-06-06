@@ -57,15 +57,19 @@ test("classifyLiveness stays HEALTHY when quiet beyond hangQuiet but broker is s
   assert.equal(verdict, "HEALTHY");
 });
 
-test("classifyLiveness reports HUNG past the hard ceiling even when broker is reachable", () => {
+test("classifyLiveness stays HEALTHY on long silence while the broker is reachable", () => {
+  // A reachable broker does not prove the turn is progressing (the broker is a
+  // separate process), but silence alone must never kill a possibly-working
+  // turn — the worker's own hard timeout owns the hung-but-alive case. Only a
+  // dead worker or an unreachable broker is a kill signal.
   const verdict = classifyLiveness({
     status: "running",
     workerAlive: true,
-    quietMs: 2_000_000,
+    quietMs: 5_000_000,
     brokerOk: true,
     thresholds: THRESHOLDS
   });
-  assert.equal(verdict, "HUNG");
+  assert.equal(verdict, "HEALTHY");
 });
 
 test("classifyLiveness stays HEALTHY for a recently-active worker", () => {
@@ -79,23 +83,20 @@ test("classifyLiveness stays HEALTHY for a recently-active worker", () => {
   assert.equal(verdict, "HEALTHY");
 });
 
-test("resolveWatchdogConfig defaults to a 5-minute interval and sane quiet thresholds", () => {
+test("resolveWatchdogConfig defaults to a 5-minute interval and sane quiet threshold", () => {
   const config = resolveWatchdogConfig({});
   assert.equal(config.intervalMs, 300_000);
   assert.equal(config.hangQuietMs, 900_000);
-  assert.equal(config.hardQuietMs, 1_800_000);
   assert.equal(config.confirmRounds, 2);
 });
 
 test("resolveWatchdogConfig honours env overrides and ignores invalid values", () => {
   const config = resolveWatchdogConfig({
     CODEX_WATCHDOG_INTERVAL_MS: "120000",
-    CODEX_WATCHDOG_HANG_QUIET_MS: "0",
-    CODEX_WATCHDOG_HARD_QUIET_MS: "not-a-number"
+    CODEX_WATCHDOG_HANG_QUIET_MS: "0"
   });
   assert.equal(config.intervalMs, 120_000);
   assert.equal(config.hangQuietMs, 900_000, "invalid (<=0) falls back to default");
-  assert.equal(config.hardQuietMs, 1_800_000, "non-numeric falls back to default");
 });
 
 test("createLivenessGate escalates instead of killing: terminate only after confirmRounds bad verdicts", () => {

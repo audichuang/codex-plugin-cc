@@ -7,8 +7,7 @@
 
 export const DEFAULTS = Object.freeze({
   intervalMs: 300_000, // 5 minutes
-  hangQuietMs: 900_000, // 15 minutes of event silence (with broker unreachable)
-  hardQuietMs: 1_800_000, // 30 minutes of silence — kill regardless of broker
+  hangQuietMs: 900_000, // 15 minutes of event silence (only kills WITH broker unreachable)
   confirmRounds: 2 // consecutive bad ticks required before terminating
 });
 
@@ -19,10 +18,12 @@ const TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled"]);
  *
  * - DONE    — the job already reached a terminal state; the watchdog can stop.
  * - DEAD    — the worker process is gone but the job never reached terminal.
- * - HUNG    — alive but silent past the hard ceiling, OR silent past the soft
- *             threshold while the broker is unreachable.
- * - HEALTHY — anything else, including a long-but-active run whose broker still
- *             answers (we must not kill a slow-but-working turn).
+ * - HUNG    — alive but silent past the soft threshold AND the broker is
+ *             unreachable. Silence alone is never fatal: a reachable broker
+ *             does not prove progress, but the worker's own hard timeout owns
+ *             the hung-but-alive case, so the watchdog must not false-kill a
+ *             slow-but-working turn on silence alone.
+ * - HEALTHY — anything else.
  */
 export function classifyLiveness({ status, workerAlive, quietMs, brokerOk, thresholds } = {}) {
   if (TERMINAL_STATUSES.has(status)) {
@@ -32,10 +33,6 @@ export function classifyLiveness({ status, workerAlive, quietMs, brokerOk, thres
     return "DEAD";
   }
   const hangQuietMs = thresholds?.hangQuietMs ?? DEFAULTS.hangQuietMs;
-  const hardQuietMs = thresholds?.hardQuietMs ?? DEFAULTS.hardQuietMs;
-  if (quietMs > hardQuietMs) {
-    return "HUNG";
-  }
   if (quietMs > hangQuietMs && !brokerOk) {
     return "HUNG";
   }
@@ -51,7 +48,6 @@ export function resolveWatchdogConfig(env = {}) {
   return {
     intervalMs: positiveIntOr(env.CODEX_WATCHDOG_INTERVAL_MS, DEFAULTS.intervalMs),
     hangQuietMs: positiveIntOr(env.CODEX_WATCHDOG_HANG_QUIET_MS, DEFAULTS.hangQuietMs),
-    hardQuietMs: positiveIntOr(env.CODEX_WATCHDOG_HARD_QUIET_MS, DEFAULTS.hardQuietMs),
     confirmRounds: positiveIntOr(env.CODEX_WATCHDOG_CONFIRM_ROUNDS, DEFAULTS.confirmRounds)
   };
 }

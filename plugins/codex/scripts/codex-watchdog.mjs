@@ -95,7 +95,7 @@ export async function gatherObservation(cwd, jobId, deps, config) {
     workerAlive,
     quietMs,
     brokerOk,
-    thresholds: { hangQuietMs: config.hangQuietMs, hardQuietMs: config.hardQuietMs },
+    thresholds: { hangQuietMs: config.hangQuietMs },
     threadId: job.threadId ?? null,
     turnId: job.turnId ?? null,
     logFile: job.logFile ?? null
@@ -103,13 +103,6 @@ export async function gatherObservation(cwd, jobId, deps, config) {
 }
 
 export async function terminateHungJob(cwd, jobId, observation, deps, verdict) {
-  if (observation.threadId || observation.turnId) {
-    await deps.interrupt(cwd, { threadId: observation.threadId, turnId: observation.turnId });
-  }
-  if (observation.pid) {
-    deps.terminate(observation.pid);
-  }
-
   const reason =
     verdict === "DEAD"
       ? `Watchdog: worker process ${observation.pid ?? "?"} is no longer running but the job never reported a terminal status. Marked failed.`
@@ -117,8 +110,11 @@ export async function terminateHungJob(cwd, jobId, observation, deps, verdict) {
           observation.threadId ? ` Resume with: codex resume ${observation.threadId}` : ""
         }`;
 
+  // CAS first: only act if the job is still active. If it completed/cancelled
+  // between observation and now, this skips — we must not interrupt/kill a
+  // finished turn nor overwrite its terminal signal.
   const completedAt = nowIso();
-  applyJobPatchIfActive(cwd, jobId, () => ({
+  const result = applyJobPatchIfActive(cwd, jobId, () => ({
     status: "failed",
     phase: "failed",
     pid: null,
@@ -127,6 +123,16 @@ export async function terminateHungJob(cwd, jobId, observation, deps, verdict) {
     watchdogTerminated: true,
     watchdogVerdict: verdict
   }));
+  if (!result.applied) {
+    return { skipped: true };
+  }
+
+  if (observation.threadId || observation.turnId) {
+    await deps.interrupt(cwd, { threadId: observation.threadId, turnId: observation.turnId });
+  }
+  if (observation.pid) {
+    deps.terminate(observation.pid);
+  }
 
   if (observation.logFile) {
     try {
