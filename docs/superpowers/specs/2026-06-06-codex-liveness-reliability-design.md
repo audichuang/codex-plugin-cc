@@ -119,6 +119,15 @@ I/O 邊界（`process.kill`、`fs.stat`、probe、`spawn`）一律以可注入 d
 1. 在 `feat/liveness-5min` 上以 TDD 完成 G0–G5，`node --test` 全綠。
 2. 依使用者工作流：完成後用既有 GPT-5.5 Prompt Builder（prompt 不改）產一份**給 Codex 審查本次實作**的提示詞。
 
+## 實作偏差（誠實記錄）
+
+實作時對 Codex 原始碼查證後，對 G5 兩個原計畫項目做了調整：
+
+- **跳過 protocol-drift（加 `requestAttestation:false` / 移除 `experimental_raw_events`）**：在 `codex-rs/app-server-protocol/src/protocol/v1.rs` 與 `v2/thread.rs` 確認這兩個欄位都標了 `#[serde(default)]`，server 端省略即反序列化為 `false`。所以本 repo 省略它們**本來就等同送 false**，補上是 no-op、不是漂移修復；亂加反而多餘，故不動。
+- **跳過 inferred-completion 在 `phase` 缺失時的強化**：那是次要 fallback，主完成路徑 `turn/completed`（Codex 對中止/失敗也會發）正常運作，且已被三層（transport watchdog / 15m hard timeout / 5m watchdog）兜底。改 `captureTurn` 狀態機風險高、邊際價值低，故維持現狀。
+
+其餘 G0–G4 與 G5 的 request() timeout、session-end surfacing 全數依設計完成，全程 TDD，`node --test` 153 passing。
+
 ## 明確不要做
 
 - 不要為「no-reply」給 broker 加 notification buffer/ack/retry（對抗驗證證明因果不成立）。
