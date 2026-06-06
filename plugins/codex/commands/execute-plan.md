@@ -83,6 +83,12 @@ Bash({
 })
 ```
 - Tell the user: "Codex is implementing your plan in the background. Use `/codex:status` to check progress, `/codex:result` to see the output when done."
+- The companion's launch output is a JSON payload that includes a `jobId` and a `signalFile` path. To surface the result automatically instead of making the user poll, set up a Monitor that waits for the terminal signal and then report:
+```bash
+# Replace <signalFile> with the path from the launch payload.
+until [ -f "<signalFile>" ]; do sleep 5; done
+```
+- When the signal file appears, run `/codex:result <jobId>` and send a `PushNotification` summarizing completion or failure. A detached liveness watchdog writes the same signal if the turn hangs or its worker dies, so this wait always terminates rather than blocking forever.
 
 ## Operating rules
 

@@ -15,3 +15,6 @@ If the user did not pass a job ID:
 If the user did pass a job ID:
 - Present the full command output to the user.
 - Do not summarize or condense it.
+
+Liveness note:
+- A background job that hangs or whose worker process dies is auto-failed by a detached liveness watchdog (it re-checks roughly every 5 minutes and escalates before acting, so a slow-but-working turn is not killed). A stale `running` row therefore flips to `failed` with a reason instead of spinning forever, and `/codex:result <id>` then returns that reason.
