@@ -111,12 +111,15 @@ export async function gatherObservation(cwd, jobId, deps, config) {
 }
 
 export async function terminateHungJob(cwd, jobId, observation, deps, verdict) {
-  const reason =
-    verdict === "DEAD"
-      ? `Watchdog: worker process ${observation.pid ?? "?"} is no longer running but the job never reported a terminal status. Marked failed.`
-      : `Watchdog: the Codex turn appears hung (no events for too long and the broker was unreachable). Marked failed.${
-          observation.threadId ? ` Resume with: codex resume ${observation.threadId}` : ""
-        }`;
+  const resumeHint = observation.threadId ? ` Resume with: codex resume ${observation.threadId}` : "";
+  let reason;
+  if (verdict === "DEAD") {
+    reason = `Watchdog: worker process ${observation.pid ?? "?"} is no longer running but the job never reported a terminal status. Marked failed.`;
+  } else if (observation.missedOwnDeadline) {
+    reason = `Watchdog: the worker blew past its own hard-timeout deadline without self-terminating (likely event-loop wedged). Marked failed.${resumeHint}`;
+  } else {
+    reason = `Watchdog: the Codex turn appears hung (no events for too long and the broker was unreachable). Marked failed.${resumeHint}`;
+  }
 
   // CAS first: only act if the job is still active. If it completed/cancelled
   // between observation and now, this skips — we must not interrupt/kill a

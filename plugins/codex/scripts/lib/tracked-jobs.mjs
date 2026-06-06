@@ -314,11 +314,16 @@ export async function runTrackedJob(job, runner, options = {}) {
       upsertJob(job.workspaceRoot, { id: job.id, ...failurePatch });
     }
     // Terminal signal on the failure path too, so a waiting monitor stops and
-    // the failure reason can be surfaced rather than hanging.
-    writeCompletionSignalFile(job.workspaceRoot, job.id, {
-      status: "failed",
-      reason: errorMessage
-    });
+    // the failure reason can be surfaced rather than hanging — but ONLY if we
+    // actually wrote the failure. If the CAS lost because another actor already
+    // finalized the job (e.g. user cancel, watchdog), do not stomp its terminal
+    // signal with "failed".
+    if (result.applied || result.stored === null) {
+      writeCompletionSignalFile(job.workspaceRoot, job.id, {
+        status: "failed",
+        reason: errorMessage
+      });
+    }
 
     // On a hard timeout the runner is still pending and holding open handles
     // (the broker socket), which can keep this process from exiting even after

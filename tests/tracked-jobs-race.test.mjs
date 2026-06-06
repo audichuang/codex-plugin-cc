@@ -6,7 +6,8 @@ import { makeTempDir } from "./helpers.mjs";
 import {
   applyJobPatchIfActive,
   resolveJobDoneFile,
-  resolveJobFile
+  resolveJobFile,
+  writeCompletionSignalFile
 } from "../plugins/codex/scripts/lib/state.mjs";
 import { runTrackedJob } from "../plugins/codex/scripts/lib/tracked-jobs.mjs";
 
@@ -40,6 +41,39 @@ test("runTrackedJob does not resurrect a job an external actor already marked te
       "must not write a completed signal over an externally-failed job"
     );
   }
+});
+
+test("runTrackedJob failure path does not overwrite a terminal .done written by another actor", async () => {
+  const workspace = makeTempDir();
+  const jobId = "job-fail-race";
+
+  // An external actor (e.g. user /codex:cancel) finalizes the job and writes
+  // its terminal signal; THEN the runner errors. The catch path's CAS loses
+  // (job no longer active), so it must not stomp the cancelled signal with one
+  // that says "failed".
+  const runner = async () => {
+    applyJobPatchIfActive(workspace, jobId, () => ({ status: "cancelled", phase: "cancelled", pid: null }));
+    writeCompletionSignalFile(workspace, jobId, { status: "cancelled", reason: "Cancelled by user." });
+    throw new Error("runner errored after an external cancel");
+  };
+
+  await assert.rejects(runTrackedJob({ id: jobId, workspaceRoot: workspace }, runner, {}));
+
+  const done = JSON.parse(fs.readFileSync(resolveJobDoneFile(workspace, jobId), "utf8"));
+  assert.equal(done.status, "cancelled", "the externally-written terminal signal must not be overwritten");
+  const record = JSON.parse(fs.readFileSync(resolveJobFile(workspace, jobId), "utf8"));
+  assert.equal(record.status, "cancelled");
+});
+
+test("runTrackedJob still writes a failed signal on a normal (no-race) failure", async () => {
+  const workspace = makeTempDir();
+  const jobId = "job-fail-normal";
+  await assert.rejects(
+    runTrackedJob({ id: jobId, workspaceRoot: workspace }, async () => {
+      throw new Error("boom");
+    }, {})
+  );
+  assert.equal(JSON.parse(fs.readFileSync(resolveJobDoneFile(workspace, jobId), "utf8")).status, "failed");
 });
 
 test("runTrackedJob still writes the completed record + signal on the normal success path", async () => {

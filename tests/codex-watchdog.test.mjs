@@ -151,6 +151,42 @@ test("terminateHungJob interrupts, kills the tree, marks failed and writes a fai
   assert.match(logText, /Watchdog/);
 });
 
+test("terminateHungJob reports a deadline-miss reason (not 'broker unreachable') when the deadline was missed", async () => {
+  const workspace = makeTempDir();
+  const jobId = "job-deadline";
+  const logFile = resolveJobLogFile(workspace, jobId);
+  const job = {
+    id: jobId,
+    status: "running",
+    phase: "investigating",
+    pid: 999_999,
+    logFile,
+    threadId: "th-d",
+    turnId: "tn-d",
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:00.000Z"
+  };
+  writeJobFile(workspace, jobId, job);
+  saveState(workspace, { version: 1, config: { stopReviewGate: false }, jobs: [job] });
+  fs.writeFileSync(logFile, "", "utf8");
+
+  const deps = { interrupt: async () => {}, terminate: () => {} };
+  const observation = {
+    status: "running",
+    pid: 999_999,
+    threadId: "th-d",
+    turnId: "tn-d",
+    logFile,
+    missedOwnDeadline: true
+  };
+
+  await terminateHungJob(workspace, jobId, observation, deps, "HUNG");
+
+  const record = JSON.parse(fs.readFileSync(resolveJobFile(workspace, jobId), "utf8"));
+  assert.match(record.errorMessage ?? "", /deadline/i);
+  assert.doesNotMatch(record.errorMessage ?? "", /broker was unreachable/i);
+});
+
 test("terminateHungJob skips interrupt when there is no thread/turn to interrupt", async () => {
   const workspace = makeTempDir();
   const jobId = "job-dead";
