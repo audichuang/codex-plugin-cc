@@ -8,8 +8,15 @@ import process from "node:process";
 import { parseArgs } from "./lib/args.mjs";
 import { BROKER_BUSY_RPC_CODE, CodexAppServerClient } from "./lib/app-server.mjs";
 import { parseBrokerEndpoint } from "./lib/broker-endpoint.mjs";
+import { createIdleTracker } from "./lib/idle-shutdown.mjs";
 
 const STREAMING_METHODS = new Set(["turn/start", "review/start", "thread/compact/start"]);
+const DEFAULT_BROKER_IDLE_TIMEOUT_MS = 5000;
+
+function resolveBrokerIdleTimeoutMs(env = process.env) {
+  const value = Number(env.CODEX_BROKER_IDLE_TIMEOUT_MS);
+  return Number.isFinite(value) && value > 0 ? Math.trunc(value) : DEFAULT_BROKER_IDLE_TIMEOUT_MS;
+}
 
 function buildStreamThreadIds(method, params, result) {
   const threadIds = new Set();
@@ -115,8 +122,11 @@ async function main() {
 
   appClient.setNotificationHandler(routeNotification);
 
+  let idleTracker = null;
+
   const server = net.createServer((socket) => {
     sockets.add(socket);
+    idleTracker?.connect();
     socket.setEncoding("utf8");
     let buffer = "";
 
@@ -225,12 +235,26 @@ async function main() {
     socket.on("close", () => {
       sockets.delete(socket);
       clearSocketOwnership(socket);
+      // 'close' is emitted after 'error' too, so counting it here (and not in
+      // the error handler) avoids double-decrementing the idle tracker.
+      idleTracker?.disconnect();
     });
 
     socket.on("error", () => {
       sockets.delete(socket);
       clearSocketOwnership(socket);
     });
+  });
+
+  // Auto-exit when no client has been connected for the idle window, so stale
+  // brokers (and the Codex app-server they own, killed by appClient.close in
+  // shutdown) do not accumulate across sessions.
+  idleTracker = createIdleTracker({
+    timeoutMs: resolveBrokerIdleTimeoutMs(),
+    onIdle: async () => {
+      await shutdown(server);
+      process.exit(0);
+    }
   });
 
   process.on("SIGTERM", async () => {
@@ -243,7 +267,11 @@ async function main() {
     process.exit(0);
   });
 
-  server.listen(listenTarget.path);
+  server.listen(listenTarget.path, () => {
+    // Arm immediately so a broker that is spawned but never used (orphaned
+    // launch) also exits instead of lingering forever.
+    idleTracker.idleStart();
+  });
 }
 
 main().catch((error) => {
