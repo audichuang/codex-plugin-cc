@@ -28,6 +28,7 @@ import {
   generateJobId,
   getConfig,
   listJobs,
+  resolveJobDoneFile,
   setConfig,
   upsertJob,
   writeJobFile
@@ -651,11 +652,26 @@ function spawnDetachedTaskWorker(cwd, jobId) {
   return child;
 }
 
-function enqueueBackgroundTask(cwd, job, request) {
+function spawnWatchdog(cwd, jobId) {
+  const scriptPath = path.join(ROOT_DIR, "scripts", "codex-watchdog.mjs");
+  const child = spawn(process.execPath, [scriptPath, "--cwd", cwd, "--job", jobId], {
+    cwd,
+    env: process.env,
+    detached: true,
+    stdio: "ignore",
+    windowsHide: true
+  });
+  child.unref();
+  return child;
+}
+
+function enqueueBackgroundTask(cwd, job, request, deps = {}) {
+  const spawnWorker = deps.spawnWorker ?? spawnDetachedTaskWorker;
+  const launchWatchdog = deps.spawnWatchdog ?? spawnWatchdog;
   const { logFile } = createTrackedProgress(job);
   appendLogLine(logFile, "Queued for background execution.");
 
-  const child = spawnDetachedTaskWorker(cwd, job.id);
+  const child = spawnWorker(cwd, job.id);
   const queuedRecord = {
     ...job,
     status: "queued",
@@ -667,15 +683,28 @@ function enqueueBackgroundTask(cwd, job, request) {
   writeJobFile(job.workspaceRoot, job.id, queuedRecord);
   upsertJob(job.workspaceRoot, queuedRecord);
 
+  // Launch the detached liveness watchdog so a hung or dead background turn is
+  // reconciled to a terminal state (and a .done signal written) even when no
+  // one polls /codex:status. Best effort: a watchdog spawn failure must never
+  // block the actual task launch.
+  try {
+    launchWatchdog(cwd, job.id);
+  } catch {
+    appendLogLine(logFile, "Warning: liveness watchdog failed to start.");
+  }
+
+  const signalFile = resolveJobDoneFile(job.workspaceRoot, job.id);
   return {
     payload: {
       jobId: job.id,
       status: "queued",
       title: job.title,
       summary: job.summary,
-      logFile
+      logFile,
+      signalFile
     },
-    logFile
+    logFile,
+    signalFile
   };
 }
 
@@ -1020,8 +1049,15 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  const message = error instanceof Error ? error.message : String(error);
-  process.stderr.write(`${message}\n`);
-  process.exitCode = 1;
-});
+const invokedDirectly =
+  process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+
+if (invokedDirectly) {
+  main().catch((error) => {
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`${message}\n`);
+    process.exitCode = 1;
+  });
+}
+
+export { enqueueBackgroundTask, spawnDetachedTaskWorker };
