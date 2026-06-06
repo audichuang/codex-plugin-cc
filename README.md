@@ -146,7 +146,7 @@ Examples:
 /codex:rescue fix the failing test with the smallest safe patch
 /codex:rescue --resume apply the top fix from the last run
 /codex:rescue --model gpt-5.4-mini --effort medium investigate the flaky integration test
-/codex:rescue --model spark fix the issue quickly
+/codex:rescue --model gpt-5.3-codex fix the issue quickly
 /codex:rescue --background investigate the regression
 ```
 
@@ -159,7 +159,7 @@ Ask Codex to redesign the database connection to be more resilient.
 **Notes:**
 
 - if you do not pass `--model` or `--effort`, the plugin defaults to `gpt-5.5` at `xhigh` reasoning effort; pass `--model`/`--effort` to override (or set `CODEX_DEFAULT_MODEL` / `CODEX_DEFAULT_EFFORT`).
-- if you say `spark`, the plugin maps that to `gpt-5.3-codex-spark`
+- pass `--model <id>` with any model id your Codex install supports (e.g. `gpt-5.4-mini`, `gpt-5.3-codex`); the plugin forwards it verbatim without rewriting model names
 - follow-up rescue requests can continue the latest Codex task in the repo
 
 ### `/codex:execute-plan`

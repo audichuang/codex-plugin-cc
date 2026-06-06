@@ -8,13 +8,61 @@ import { makeTempDir } from "./helpers.mjs";
 import {
   applyJobPatchIfActive,
   listJobs,
+  readJobFile,
   resolveJobFile,
+  resolveJobLockFile,
   resolveJobLogFile,
   resolveStateDir,
   resolveStateFile,
   saveState,
   writeJobFile
 } from "../plugins/codex/scripts/lib/state.mjs";
+
+test("applyJobPatchIfActive wins the cross-process terminal CAS and records an O_EXCL claim", () => {
+  const workspace = makeTempDir();
+  const jobId = "job-cas-win";
+  writeJobFile(workspace, jobId, { id: jobId, status: "running", phase: "running", pid: null });
+
+  const result = applyJobPatchIfActive(workspace, jobId, () => ({ status: "completed", phase: "done" }));
+
+  assert.equal(result.applied, true);
+  assert.equal(fs.existsSync(resolveJobLockFile(workspace, jobId)), true, "the terminal claim file must exist");
+  assert.equal(readJobFile(resolveJobFile(workspace, jobId)).status, "completed");
+});
+
+test("applyJobPatchIfActive loses the terminal CAS when another process already claimed it (O_EXCL)", () => {
+  const workspace = makeTempDir();
+  const jobId = "job-cas-lose";
+  // The per-job file is still active (a real cross-process race: this process
+  // read it as running before the competitor's terminal write landed).
+  writeJobFile(workspace, jobId, { id: jobId, status: "running", phase: "running", pid: null });
+  // Simulate the competitor having already claimed the terminal transition.
+  fs.writeFileSync(resolveJobLockFile(workspace, jobId), "completed\n", "utf8");
+
+  const result = applyJobPatchIfActive(workspace, jobId, () => ({ status: "failed", phase: "failed" }));
+
+  assert.equal(result.applied, false, "must not write a second terminal record after losing the claim");
+  assert.equal(
+    readJobFile(resolveJobFile(workspace, jobId)).status,
+    "running",
+    "the per-job record must not be clobbered after losing the terminal claim"
+  );
+});
+
+test("applyJobPatchIfActive does not claim a terminal lock for a non-terminal (progress) patch", () => {
+  const workspace = makeTempDir();
+  const jobId = "job-progress";
+  writeJobFile(workspace, jobId, { id: jobId, status: "running", phase: "starting", pid: null });
+
+  const result = applyJobPatchIfActive(workspace, jobId, () => ({ phase: "investigating" }));
+
+  assert.equal(result.applied, true);
+  assert.equal(
+    fs.existsSync(resolveJobLockFile(workspace, jobId)),
+    false,
+    "progress updates must not consume the one-shot terminal claim"
+  );
+});
 
 test("resolveStateDir uses a temp-backed per-workspace directory when CLAUDE_PLUGIN_DATA is unset", () => {
   const workspace = makeTempDir();

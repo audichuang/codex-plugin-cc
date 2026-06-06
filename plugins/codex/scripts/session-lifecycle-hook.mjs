@@ -126,20 +126,27 @@ async function handleSessionEnd(input) {
   const sessionDir = brokerSession?.sessionDir ?? null;
   const pid = brokerSession?.pid ?? null;
 
-  if (brokerEndpoint) {
-    await sendBrokerShutdown(brokerEndpoint);
+  try {
+    if (brokerEndpoint) {
+      await sendBrokerShutdown(brokerEndpoint);
+    }
+  } finally {
+    // Always tear down — even if the graceful shutdown RPC threw — so we never
+    // leak the broker process, its temp files, or a stale broker.json that the
+    // next session would try to reuse. (The shutdown RPC is now time-bounded, so
+    // this also cannot sit behind an unbounded await and miss the 5s hook
+    // timeout.)
+    cleanupSessionJobs(cwd, input.session_id || process.env[SESSION_ID_ENV]);
+    teardownBrokerSession({
+      endpoint: brokerEndpoint,
+      pidFile,
+      logFile,
+      sessionDir,
+      pid,
+      killProcess: terminateProcessTree
+    });
+    clearBrokerSession(cwd);
   }
-
-  cleanupSessionJobs(cwd, input.session_id || process.env[SESSION_ID_ENV]);
-  teardownBrokerSession({
-    endpoint: brokerEndpoint,
-    pidFile,
-    logFile,
-    sessionDir,
-    pid,
-    killProcess: terminateProcessTree
-  });
-  clearBrokerSession(cwd);
 }
 
 async function main() {

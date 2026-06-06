@@ -22,7 +22,7 @@ import {
   } from "./lib/codex.mjs";
 import { readStdinIfPiped } from "./lib/fs.mjs";
 import { collectReviewContext, ensureGitRepository, resolveReviewTarget } from "./lib/git.mjs";
-import { binaryAvailable, terminateProcessTree } from "./lib/process.mjs";
+import { binaryAvailable, isProcessAlive, terminateProcessTree } from "./lib/process.mjs";
 import { loadPromptTemplate, interpolateTemplate } from "./lib/prompts.mjs";
 import {
   applyJobPatchIfActive,
@@ -49,6 +49,7 @@ import {
   createJobProgressUpdater,
   createJobRecord,
   createProgressReporter,
+  indexedTerminalStatus,
   nowIso,
   runTrackedJob,
   SESSION_ID_ENV
@@ -70,7 +71,6 @@ const REVIEW_SCHEMA = path.join(ROOT_DIR, "schemas", "review-output.schema.json"
 const DEFAULT_STATUS_WAIT_TIMEOUT_MS = 240000;
 const DEFAULT_STATUS_POLL_INTERVAL_MS = 2000;
 const VALID_REASONING_EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh"]);
-const MODEL_ALIASES = new Map([["spark", "gpt-5.3-codex-spark"]]);
 
 // Defaults applied when the caller does not pass --model / --effort. Overridable
 // via env so a workspace can pin a different model or dial reasoning effort
@@ -95,7 +95,7 @@ function printUsage() {
       "  node scripts/codex-companion.mjs setup [--enable-review-gate|--disable-review-gate] [--json]",
       "  node scripts/codex-companion.mjs review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>]",
       "  node scripts/codex-companion.mjs adversarial-review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [focus text]",
-      "  node scripts/codex-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh] [--model <model|spark>] [--effort <none|minimal|low|medium|high|xhigh>] [prompt]",
+      "  node scripts/codex-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh] [--model <model>] [--effort <none|minimal|low|medium|high|xhigh>] [prompt]",
       "  node scripts/codex-companion.mjs status [job-id] [--all] [--json]",
       "  node scripts/codex-companion.mjs result [job-id] [--json]",
       "  node scripts/codex-companion.mjs cancel [job-id] [--json]"
@@ -123,7 +123,12 @@ function normalizeRequestedModel(model) {
   if (!normalized) {
     return resolveDefaultModel();
   }
-  return MODEL_ALIASES.get(normalized.toLowerCase()) ?? normalized;
+  // Forward the requested model verbatim. The plugin deliberately does not
+  // alias or rewrite model names: the old `spark` -> `gpt-5.3-codex-spark`
+  // alias pointed at a slug that does not exist in Codex's model catalog and
+  // was sent literally to the provider, surfacing only as an opaque turn
+  // failure. Callers pass real Codex model ids (e.g. gpt-5.3-codex).
+  return normalized;
 }
 
 function normalizeReasoningEffort(effort) {
@@ -206,7 +211,11 @@ async function buildSetupReport(cwd, actionsTaken = []) {
   if (!codexStatus.available) {
     nextSteps.push("Install Codex with `npm install -g @openai/codex`.");
   }
-  if (codexStatus.available && !authStatus.loggedIn && authStatus.requiresOpenaiAuth) {
+  // Steer the user to log in whenever they are not authenticated, UNLESS we
+  // positively know auth is unnecessary (requiresOpenaiAuth === false). When the
+  // account/config read failed, requiresOpenaiAuth is null (unknown) — we must
+  // still surface login guidance rather than silently dropping it.
+  if (codexStatus.available && !authStatus.loggedIn && authStatus.requiresOpenaiAuth !== false) {
     nextSteps.push("Run `!codex login`.");
     nextSteps.push("If browser login is blocked, retry with `!codex login --device-auth` or `!codex login --with-api-key`.");
   }
@@ -986,7 +995,12 @@ async function handleCancel(argv) {
     );
   }
 
-  terminateProcessTree(job.pid ?? Number.NaN);
+  // Only signal a pid we can still see alive. Terminating blindly risks hitting
+  // a recycled pid once the original worker has exited; the dead-PID reconcile
+  // already flips crashed "running" jobs to a terminal state independently.
+  if (Number.isInteger(job.pid) && job.pid > 0 && isProcessAlive(job.pid)) {
+    terminateProcessTree(job.pid);
+  }
   appendLogLine(job.logFile, "Cancelled by user.");
 
   const completedAt = nowIso();
@@ -1006,14 +1020,22 @@ async function handleCancel(argv) {
   const result = applyJobPatchIfActive(workspaceRoot, job.id, () => cancelPatch);
 
   // Defensive fallback: the per-job file was pruned mid-flight (stored===null),
-  // so there is no terminal record to clobber — recreate the cancelled record.
-  if (!result.applied && result.stored === null) {
+  // so there is no terminal record to clobber — recreate the cancelled record,
+  // but ONLY if no other actor already finalized the job in the shared index.
+  // Without this guard cancel could resurrect a job to "cancelled" that the
+  // index already records as completed/failed (matches the runner/failure
+  // recreate guards — first terminal writer wins).
+  const recreatedCancelled =
+    !result.applied && result.stored === null && !indexedTerminalStatus(workspaceRoot, job.id);
+  if (recreatedCancelled) {
     writeJobFile(workspaceRoot, job.id, { ...existing, ...job, ...cancelPatch });
     upsertJob(workspaceRoot, { id: job.id, ...cancelPatch });
   }
 
-  const finalizedAsCancelled = result.applied || result.stored === null;
-  const finalStatus = finalizedAsCancelled ? "cancelled" : result.stored?.status ?? "cancelled";
+  const finalizedAsCancelled = result.applied || recreatedCancelled;
+  const finalStatus = finalizedAsCancelled
+    ? "cancelled"
+    : result.stored?.status ?? indexedTerminalStatus(workspaceRoot, job.id) ?? "cancelled";
 
   if (finalizedAsCancelled) {
     // Terminal signal so a monitor waiting on <jobId>.done wakes after a user

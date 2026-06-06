@@ -3,8 +3,27 @@ import assert from "node:assert/strict";
 
 import {
   AppServerClientBase,
+  CodexAppServerClient,
   resolveRequestTimeoutMs
 } from "../plugins/codex/scripts/lib/app-server.mjs";
+
+test("CodexAppServerClient.connect closes the partially-built client and rethrows if initialize() fails", async () => {
+  let closed = 0;
+  const fake = {
+    initialize: async () => {
+      throw new Error("init boom");
+    },
+    close: async () => {
+      closed += 1;
+    }
+  };
+
+  await assert.rejects(
+    CodexAppServerClient.connect("/ws", { disableBroker: true, clientFactory: () => fake }),
+    /init boom/
+  );
+  assert.equal(closed, 1, "a spawned client whose initialize() throws must be closed so its child process is not leaked");
+});
 
 class SilentClient extends AppServerClientBase {
   // Never responds, so a request can only settle via timeout.

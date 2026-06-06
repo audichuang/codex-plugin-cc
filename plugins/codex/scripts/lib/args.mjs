@@ -86,6 +86,18 @@ export function splitRawArgumentString(raw) {
       continue;
     }
 
+    // POSIX single quotes: every character is literal (backslashes included)
+    // until the matching closing quote. This must be checked BEFORE the escape
+    // handling below, otherwise a backslash inside '...' is wrongly consumed.
+    if (quote === "'") {
+      if (character === "'") {
+        quote = null;
+      } else {
+        current += character;
+      }
+      continue;
+    }
+
     if (character === "\\") {
       escaping = true;
       continue;

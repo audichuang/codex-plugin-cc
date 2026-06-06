@@ -62,9 +62,19 @@ export function makeDefaultDeps() {
         // Lazy import so the watchdog's testable core never pulls in the heavy
         // app-server stack; tests inject their own interrupt dep.
         const { interruptAppServerTurn } = await import("./lib/codex.mjs");
-        await interruptAppServerTurn(cwd, ctx);
+        return await interruptAppServerTurn(cwd, ctx);
       } catch {
-        // Best effort — interrupt is a courtesy before the hard kill.
+        // Best effort — interrupt is a courtesy before the hard kill. Report it
+        // as unconfirmed so the caller escalates to reaping the broker.
+        return { attempted: false, interrupted: false };
+      }
+    },
+    readBrokerPid: (cwd) => {
+      try {
+        const session = loadBrokerSession(cwd);
+        return Number.isInteger(session?.pid) ? session.pid : null;
+      } catch {
+        return null;
       }
     },
     terminate: (pid) => {
@@ -138,11 +148,39 @@ export async function terminateHungJob(cwd, jobId, observation, deps, verdict) {
     return { skipped: true };
   }
 
-  if (observation.threadId || observation.turnId) {
-    await deps.interrupt(cwd, { threadId: observation.threadId, turnId: observation.turnId });
+  // interruptAppServerTurn no-ops unless BOTH ids are present (gating on OR made
+  // the watchdog believe it interrupted when the RPC silently did nothing).
+  // Capture the result so we can tell whether the turn was actually stopped.
+  let interruptResult = null;
+  if (observation.threadId && observation.turnId) {
+    interruptResult = await deps.interrupt(cwd, { threadId: observation.threadId, turnId: observation.turnId });
   }
   if (observation.pid) {
     deps.terminate(observation.pid);
+  }
+
+  // The hung turn runs inside `codex app-server`, a child of the BROKER's
+  // process group — not the worker's — so terminating the worker tree does not
+  // stop it. The interrupt RPC is the only other lever and, in the
+  // broker-unreachable hang this watchdog exists for, it cannot connect. If the
+  // interrupt did not confirm, escalate by terminating the broker process so
+  // the OS reaps its orphaned app-server turn instead of letting it run on.
+  const interruptConfirmed = Boolean(interruptResult && interruptResult.interrupted);
+  if (!interruptConfirmed && deps.readBrokerPid) {
+    const brokerPid = deps.readBrokerPid(cwd);
+    if (Number.isInteger(brokerPid) && brokerPid > 0) {
+      deps.terminate(brokerPid);
+      if (observation.logFile) {
+        try {
+          appendLogLine(
+            observation.logFile,
+            `Watchdog: turn interrupt unconfirmed; terminated broker process ${brokerPid} to reap the orphaned app-server turn.`
+          );
+        } catch {
+          // Logging is best effort.
+        }
+      }
+    }
   }
 
   if (observation.logFile) {

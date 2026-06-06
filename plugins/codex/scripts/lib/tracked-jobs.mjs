@@ -20,9 +20,16 @@ const TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled"]);
 // file vanished (pruned mid-run). That recreate is only safe when no other
 // actor has already finalized the job in the shared index — otherwise a late
 // writer would resurrect a job that first-terminal-writer-wins already decided.
-function indexHasTerminalRecord(workspaceRoot, jobId) {
+// Returns the index's terminal status for a job (completed/failed/cancelled),
+// or null when the job is absent or still active. Exported so other terminal
+// writers (e.g. the cancel handler) share one definition of "already decided".
+export function indexedTerminalStatus(workspaceRoot, jobId) {
   const entry = loadState(workspaceRoot).jobs.find((job) => job.id === jobId);
-  return Boolean(entry && TERMINAL_STATUSES.has(entry.status));
+  return entry && TERMINAL_STATUSES.has(entry.status) ? entry.status : null;
+}
+
+function indexHasTerminalRecord(workspaceRoot, jobId) {
+  return indexedTerminalStatus(workspaceRoot, jobId) !== null;
 }
 
 // Lazy import so this module never statically depends on the heavy app-server
@@ -311,10 +318,12 @@ export async function runTrackedJob(job, runner, options = {}) {
       const interrupt = options.interruptOnTimeout ?? defaultInterruptOnTimeout;
       try {
         const stored = readJobFile(resolveJobFile(job.workspaceRoot, job.id));
-        if (stored?.threadId || stored?.turnId) {
+        // interruptAppServerTurn no-ops unless BOTH ids are present; gate on AND
+        // so a half-populated record does not trigger a guaranteed-useless RPC.
+        if (stored?.threadId && stored?.turnId) {
           await interrupt(job.cwd ?? job.workspaceRoot, {
-            threadId: stored.threadId ?? null,
-            turnId: stored.turnId ?? null
+            threadId: stored.threadId,
+            turnId: stored.turnId
           });
         }
       } catch {

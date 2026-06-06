@@ -2,14 +2,20 @@ import { spawnSync } from "node:child_process";
 import process from "node:process";
 
 export function runCommand(command, args = [], options = {}) {
-  const result = spawnSync(command, args, {
+  const spawnImpl = options.spawnImpl ?? spawnSync;
+  const result = spawnImpl(command, args, {
     cwd: options.cwd,
     env: options.env,
     encoding: "utf8",
     input: options.input,
     maxBuffer: options.maxBuffer,
     stdio: options.stdio ?? "pipe",
-    shell: process.platform === "win32" ? (process.env.SHELL || true) : false,
+    // Never run through a shell. spawnSync with shell:true concatenates the
+    // args array into the command line WITHOUT escaping (Node DEP0190), so a
+    // user-controlled value (e.g. a git `--base` ref or a changed-file path)
+    // becomes shell injection on Windows. git/codex/taskkill are real
+    // executables and resolve fine with shell:false.
+    shell: false,
     windowsHide: true
   });
 
@@ -70,7 +76,11 @@ export function isProcessAlive(pidValue) {
 }
 
 export function terminateProcessTree(pid, options = {}) {
-  if (!Number.isFinite(pid)) {
+  // A pid must be a positive integer. Reject fractions/NaN/Infinity/<=0 so we
+  // never derive a bogus target: kill(-pid)/`taskkill /PID String(pid)` on a
+  // fractional or zero pid can hit the wrong process group. This matches the
+  // guard in isProcessAlive.
+  if (!Number.isInteger(pid) || pid <= 0) {
     return { attempted: false, delivered: false, method: null };
   }
 

@@ -10,7 +10,22 @@ import {
   saveState,
   writeJobFile
 } from "../plugins/codex/scripts/lib/state.mjs";
-import { createJobProgressUpdater } from "../plugins/codex/scripts/lib/tracked-jobs.mjs";
+import { createJobProgressUpdater, indexedTerminalStatus } from "../plugins/codex/scripts/lib/tracked-jobs.mjs";
+
+test("indexedTerminalStatus returns the index status only for terminal jobs", () => {
+  const workspace = makeTempDir();
+  saveState(workspace, {
+    version: 1,
+    config: { stopReviewGate: false },
+    jobs: [
+      { id: "done-job", status: "failed" },
+      { id: "live-job", status: "running" }
+    ]
+  });
+  assert.equal(indexedTerminalStatus(workspace, "done-job"), "failed");
+  assert.equal(indexedTerminalStatus(workspace, "live-job"), null);
+  assert.equal(indexedTerminalStatus(workspace, "missing-job"), null);
+});
 
 function seedJob(workspace, overrides) {
   const jobId = overrides.id ?? "task-progress";

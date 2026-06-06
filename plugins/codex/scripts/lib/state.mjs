@@ -12,9 +12,35 @@ const FALLBACK_STATE_ROOT_DIR = path.join(os.tmpdir(), "codex-companion");
 const STATE_FILE_NAME = "state.json";
 const JOBS_DIR_NAME = "jobs";
 const MAX_JOBS = 50;
+const TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled"]);
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+// Write a file atomically: write to a unique temp file in the same directory,
+// then rename it into place (rename is atomic on POSIX/NTFS within a dir). This
+// guarantees a concurrent reader never observes a half-written state.json /
+// per-job record / .done signal. It does NOT serialize concurrent writers — two
+// processes can still last-write-wins the whole-file index; see saveState.
+let atomicWriteCounter = 0;
+function atomicWriteFileSync(filePath, data) {
+  atomicWriteCounter += 1;
+  const tmp = path.join(
+    path.dirname(filePath),
+    `.${path.basename(filePath)}.${process.pid}.${atomicWriteCounter}.tmp`
+  );
+  fs.writeFileSync(tmp, data, "utf8");
+  try {
+    fs.renameSync(tmp, filePath);
+  } catch (error) {
+    try {
+      fs.unlinkSync(tmp);
+    } catch {
+      // Best effort: the rename failed, so the temp is the only orphan.
+    }
+    throw error;
+  }
 }
 
 function defaultState() {
@@ -111,9 +137,16 @@ export function saveState(cwd, state) {
     removeJobFile(resolveJobFile(cwd, job.id));
     removeFileIfExists(job.logFile);
     removeFileIfExists(resolveJobDoneFile(cwd, job.id));
+    removeFileIfExists(resolveJobLockFile(cwd, job.id));
   }
 
-  fs.writeFileSync(resolveStateFile(cwd), `${JSON.stringify(nextState, null, 2)}\n`, "utf8");
+  // Atomic write so a concurrent reader never sees a torn index. NOTE: this does
+  // not prevent a cross-process lost update — two processes that each loadState,
+  // mutate a different job, then write will clobber each other's whole-array
+  // snapshot. The per-job files remain the source of truth; the index is a cache
+  // rebuilt on every write. Eliminating the lost update would need a
+  // workspace-level lock (deliberately out of scope here).
+  atomicWriteFileSync(resolveStateFile(cwd), `${JSON.stringify(nextState, null, 2)}\n`);
   return nextState;
 }
 
@@ -160,6 +193,29 @@ function defaultActivePredicate(stored) {
   return stored?.status === "queued" || stored?.status === "running";
 }
 
+// Cross-process CAS for a job's terminal transition. The first process to
+// atomically create the per-job .lock (O_CREAT | O_EXCL) wins and may write the
+// terminal record; a racing writer in another process gets EEXIST and returns
+// false, so two processes can never both finalize the same job. Returns true if
+// this process won the claim.
+function claimTerminalTransition(cwd, jobId, status, stamp) {
+  const lockFile = resolveJobLockFile(cwd, jobId);
+  try {
+    const fd = fs.openSync(lockFile, "wx");
+    try {
+      fs.writeSync(fd, `${status} ${stamp}\n`);
+    } finally {
+      fs.closeSync(fd);
+    }
+    return true;
+  } catch (error) {
+    if (error?.code === "EEXIST") {
+      return false;
+    }
+    throw error;
+  }
+}
+
 /**
  * Atomically transitions a job record. Reads the per-job JSON, verifies the
  * job is still in an active status (queued/running), optionally runs an
@@ -169,6 +225,13 @@ function defaultActivePredicate(stored) {
  * read-check-write sequence cannot interleave with another async writer in
  * the same process, so timeout catch, dead-PID reconcile, and progress
  * updates cannot clobber each other's metadata within one Node process.
+ *
+ * Across PROCESSES the active-state gate alone is not enough (two processes can
+ * both read the job as active before either writes), so a TERMINAL transition
+ * additionally wins a per-job O_EXCL claim file: the first process to create it
+ * may write the terminal record; a racing process gets EEXIST and returns
+ * `applied:false`. This makes "first terminal writer wins" hold across the
+ * worker, watchdog, cancel handler, and dead-PID reconcile.
  *
  * The active-state gate ALWAYS runs — callers cannot bypass it. `extraGuard`
  * is an additional check on top of it. This prevents a future caller from
@@ -212,15 +275,38 @@ export function applyJobPatchIfActive(cwd, jobId, patchOrBuilder, extraGuard = n
 
   const updatedAt = nowIso();
   const patch = { ...rawPatch, updatedAt };
+  const isTerminalTransition = Boolean(patch.status && TERMINAL_STATUSES.has(patch.status));
 
-  writeJobFile(cwd, jobId, { ...stored, ...patch });
+  // The active-state gate above only serializes writers within THIS process.
+  // For a terminal transition, additionally win a cross-process O_EXCL claim so
+  // a worker, watchdog, cancel, and dead-PID reconcile in separate processes
+  // cannot all finalize the same job. Progress/non-terminal patches are not
+  // gated — they may legitimately repeat.
+  if (isTerminalTransition && !claimTerminalTransition(cwd, jobId, patch.status, updatedAt)) {
+    return { applied: false, stored, patch: null };
+  }
 
-  if (indexPatchOrBuilder == null) {
-    upsertJob(cwd, { id: jobId, ...patch });
-  } else {
-    const indexRaw =
-      typeof indexPatchOrBuilder === "function" ? indexPatchOrBuilder(stored) : indexPatchOrBuilder;
-    upsertJob(cwd, { id: jobId, ...indexRaw, updatedAt });
+  try {
+    writeJobFile(cwd, jobId, { ...stored, ...patch });
+
+    if (indexPatchOrBuilder == null) {
+      upsertJob(cwd, { id: jobId, ...patch });
+    } else {
+      const indexRaw =
+        typeof indexPatchOrBuilder === "function" ? indexPatchOrBuilder(stored) : indexPatchOrBuilder;
+      upsertJob(cwd, { id: jobId, ...indexRaw, updatedAt });
+    }
+  } catch (error) {
+    if (isTerminalTransition) {
+      // We won the claim but failed to persist; release it so a later attempt
+      // can still finalize the job instead of wedging behind a stale lock.
+      try {
+        fs.unlinkSync(resolveJobLockFile(cwd, jobId));
+      } catch {
+        // Best effort.
+      }
+    }
+    throw error;
   }
 
   return { applied: true, stored, patch };
@@ -328,7 +414,7 @@ export function getConfig(cwd) {
 export function writeJobFile(cwd, jobId, payload) {
   ensureStateDir(cwd);
   const jobFile = resolveJobFile(cwd, jobId);
-  fs.writeFileSync(jobFile, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+  atomicWriteFileSync(jobFile, `${JSON.stringify(payload, null, 2)}\n`);
   return jobFile;
 }
 
@@ -357,6 +443,13 @@ export function resolveJobDoneFile(cwd, jobId) {
   return path.join(resolveJobsDir(cwd), `${jobId}.done`);
 }
 
+// One-shot terminal-claim marker for a job (see claimTerminalTransition). Its
+// atomic O_EXCL creation is the cross-process "first terminal writer wins" gate.
+export function resolveJobLockFile(cwd, jobId) {
+  ensureStateDir(cwd);
+  return path.join(resolveJobsDir(cwd), `${jobId}.lock`);
+}
+
 /**
  * Writes a terminal "done" signal file for a job. A monitor (the Claude-side
  * `until [ -f signalFile ]` loop, or the detached watchdog) tails this file to
@@ -372,6 +465,6 @@ export function writeCompletionSignalFile(cwd, jobId, signal = {}) {
     reason: signal.reason ?? null,
     signaledAt: nowIso()
   };
-  fs.writeFileSync(doneFile, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+  atomicWriteFileSync(doneFile, `${JSON.stringify(payload, null, 2)}\n`);
   return doneFile;
 }

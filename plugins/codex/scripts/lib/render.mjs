@@ -465,10 +465,17 @@ export function renderStoredJobResult(job, storedJob) {
 }
 
 export function renderCancelReport(job) {
+  // The cancel may have lost the durable race: another actor finalized the job
+  // (completed/failed) before our write won. Report the real outcome instead of
+  // always claiming "Cancelled".
+  const headline =
+    job.status && job.status !== "cancelled"
+      ? `${job.id} was not cancelled — it had already finished as ${job.status}.`
+      : `Cancelled ${job.id}.`;
   const lines = [
     "# Codex Cancel",
     "",
-    `Cancelled ${job.id}.`,
+    headline,
     ""
   ];
 

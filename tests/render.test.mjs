@@ -1,7 +1,26 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { renderJobStatusReport, renderReviewResult, renderStoredJobResult } from "../plugins/codex/scripts/lib/render.mjs";
+import {
+  renderCancelReport,
+  renderJobStatusReport,
+  renderReviewResult,
+  renderStoredJobResult
+} from "../plugins/codex/scripts/lib/render.mjs";
+
+test("renderCancelReport confirms cancellation when the job was actually cancelled", () => {
+  const out = renderCancelReport({ id: "job-y", status: "cancelled", title: "Investigate" });
+  assert.match(out, /Cancelled job-y\./);
+});
+
+test("renderCancelReport reports the real terminal status when the cancel lost the race", () => {
+  // The job finalized as completed before cancel's durable write won, so the
+  // report must NOT claim it was cancelled.
+  const out = renderCancelReport({ id: "job-x", status: "completed", title: "Investigate" });
+  assert.doesNotMatch(out, /Cancelled job-x\./);
+  assert.match(out, /completed/i);
+  assert.match(out, /job-x/);
+});
 
 test("renderReviewResult degrades gracefully when JSON is missing required review fields", () => {
   const output = renderReviewResult(

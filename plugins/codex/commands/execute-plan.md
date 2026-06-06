@@ -1,7 +1,7 @@
 ---
 description: Read a plan file and hand it to Codex for full implementation with write access
 argument-hint: '[plan-file-path] [--background|--wait] [--model <model>] [--effort <effort>]'
-allowed-tools: Read, Glob, Bash(node:*), Bash(cat:*), Bash(mktemp:*), AskUserQuestion
+allowed-tools: Read, Glob, Bash(node:*), Bash(cat:*), Bash(mktemp:*), AskUserQuestion, Monitor, PushNotification
 ---
 
 Read a plan file and delegate its implementation to Codex with write access.
@@ -74,16 +74,13 @@ Foreground flow:
 - Clean up the temp file after completion.
 
 Background flow:
-- Launch with `Bash` in background mode:
-```typescript
-Bash({
-  command: `node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" task --write --prompt-file "$TMPFILE" [--model <model>] [--effort <effort>]`,
-  description: "Codex execute plan",
-  run_in_background: true
-})
+- Launch the tracked background job. The companion enqueues it, spawns a detached worker plus a liveness watchdog, and returns immediately — so run this as a normal (foreground) `Bash` call and do NOT set `run_in_background`. The `--background --json` flags are required: `--background` enqueues the tracked job and `--json` makes the launch print the payload you parse below.
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" task --background --json --write --prompt-file "$TMPFILE" [--model <model>] [--effort <effort>]
 ```
-- Tell the user: "Codex is implementing your plan in the background. Use `/codex:status` to check progress, `/codex:result` to see the output when done."
-- The companion's launch output is a JSON payload that includes a `jobId` and a `signalFile` path. To surface the result automatically instead of making the user poll, set up a Monitor that waits for the terminal signal and then report:
+- The launch prints a JSON payload that includes a `jobId` and a `signalFile` path. Parse both from that output. (Without `--json` the launch prints plain text and there is no `signalFile` to read.)
+- Tell the user: "Codex is implementing your plan in the background. Use `/codex:status <jobId>` to check progress, `/codex:result <jobId>` to see the output when done."
+- To surface the result automatically instead of making the user poll, start a `Monitor` that watches for the terminal signal file. The until-loop below is the Monitor's wait condition — run it via `Monitor`, not in the foreground (foreground `sleep` is blocked by the harness):
 ```bash
 # Replace <signalFile> with the path from the launch payload.
 until [ -f "<signalFile>" ]; do sleep 5; done

@@ -6,7 +6,7 @@ import process from "node:process";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createBrokerEndpoint, parseBrokerEndpoint } from "./broker-endpoint.mjs";
-import { terminateProcessTree } from "./process.mjs";
+import { isProcessAlive, terminateProcessTree } from "./process.mjs";
 import { resolveStateDir } from "./state.mjs";
 
 export const PID_FILE_ENV = "CODEX_COMPANION_APP_SERVER_PID_FILE";
@@ -41,19 +41,33 @@ export async function waitForBrokerEndpoint(endpoint, timeoutMs = 2000) {
   return false;
 }
 
-export async function sendBrokerShutdown(endpoint) {
+export async function sendBrokerShutdown(endpoint, timeoutMs = 1500) {
   await new Promise((resolve) => {
     const socket = connectToEndpoint(endpoint);
+    let settled = false;
+    const done = () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      try {
+        socket.destroy();
+      } catch {
+        // Best effort.
+      }
+      resolve();
+    };
     socket.setEncoding("utf8");
+    // Bound the wait: a broker that connects but never replies (and never
+    // closes) would otherwise hang the caller forever. The SessionEnd hook has
+    // a hard 5s budget, so this graceful RPC must self-terminate well before it.
+    socket.setTimeout(timeoutMs, done);
     socket.on("connect", () => {
       socket.write(`${JSON.stringify({ id: 1, method: "broker/shutdown", params: {} })}\n`);
     });
-    socket.on("data", () => {
-      socket.end();
-      resolve();
-    });
-    socket.on("error", resolve);
-    socket.on("close", resolve);
+    socket.on("data", done);
+    socket.on("error", done);
+    socket.on("close", done);
   });
 }
 
@@ -111,6 +125,54 @@ async function isBrokerEndpointReady(endpoint) {
   }
 }
 
+function defaultForceKill(pid) {
+  // SIGKILL the process group first (matches terminateProcessTree's group
+  // signalling), then fall back to the bare pid.
+  for (const target of [-pid, pid]) {
+    try {
+      process.kill(target, "SIGKILL");
+      return;
+    } catch {
+      // Try the next target; if both fail the process is already gone.
+    }
+  }
+}
+
+// Tear down a stale broker and, if it survives the graceful SIGTERM (its
+// SIGTERM handler runs an async shutdown that can hang), escalate to SIGKILL
+// before a replacement is spawned — otherwise two brokers can run at once.
+export async function reapStaleBroker(session, options = {}) {
+  const killProcess = options.killProcess ?? terminateProcessTree;
+  const aliveCheck = options.isProcessAlive ?? isProcessAlive;
+  const forceKill = options.forceKill ?? defaultForceKill;
+  const sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+  const escalateAfterMs = options.escalateAfterMs ?? 500;
+
+  teardownBrokerSession({
+    endpoint: session.endpoint ?? null,
+    pidFile: session.pidFile ?? null,
+    logFile: session.logFile ?? null,
+    sessionDir: session.sessionDir ?? null,
+    pid: session.pid ?? null,
+    killProcess
+  });
+
+  const pid = session.pid;
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return;
+  }
+
+  const step = 50;
+  let waited = 0;
+  while (waited < escalateAfterMs && aliveCheck(pid)) {
+    await sleep(step);
+    waited += step;
+  }
+  if (aliveCheck(pid)) {
+    forceKill(pid);
+  }
+}
+
 export async function ensureBrokerSession(cwd, options = {}) {
   const existing = loadBrokerSession(cwd);
   if (existing && (await isBrokerEndpointReady(existing.endpoint))) {
@@ -118,13 +180,12 @@ export async function ensureBrokerSession(cwd, options = {}) {
   }
 
   if (existing) {
-    teardownBrokerSession({
-      endpoint: existing.endpoint ?? null,
-      pidFile: existing.pidFile ?? null,
-      logFile: existing.logFile ?? null,
-      sessionDir: existing.sessionDir ?? null,
-      pid: existing.pid ?? null,
-      killProcess: options.killProcess ?? terminateProcessTree
+    await reapStaleBroker(existing, {
+      killProcess: options.killProcess ?? terminateProcessTree,
+      isProcessAlive: options.isProcessAlive,
+      forceKill: options.forceKill,
+      sleep: options.sleep,
+      escalateAfterMs: options.escalateAfterMs
     });
     clearBrokerSession(cwd);
   }

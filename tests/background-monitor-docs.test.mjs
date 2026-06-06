@@ -19,6 +19,20 @@ test("execute-plan background flow documents the signal-file Monitor + PushNotif
   assert.match(source, /PushNotification/);
 });
 
+test("execute-plan background launch emits the JSON payload it tells the model to parse", () => {
+  const source = read("commands/execute-plan.md");
+  // jobId + signalFile only exist when the launch uses --background --json. Without
+  // them the companion prints plain text and the documented parse step is impossible.
+  assert.match(source, /task --background --json --write --prompt-file/);
+});
+
+test("execute-plan grants the Monitor + PushNotification tools its background flow uses", () => {
+  const source = read("commands/execute-plan.md");
+  const frontmatter = source.split("---")[1] ?? "";
+  assert.match(frontmatter, /allowed-tools:.*\bMonitor\b/);
+  assert.match(frontmatter, /allowed-tools:.*\bPushNotification\b/);
+});
+
 test("status command documents the liveness watchdog", () => {
   const source = read("commands/status.md");
   assert.match(source, /watchdog/i);

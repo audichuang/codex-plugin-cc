@@ -386,10 +386,21 @@ export class CodexAppServerClient {
         brokerEndpoint = brokerSession?.endpoint ?? null;
       }
     }
-    const client = brokerEndpoint
-      ? new BrokerCodexAppServerClient(cwd, { ...options, brokerEndpoint })
-      : new SpawnedCodexAppServerClient(cwd, options);
-    await client.initialize();
+    const client = options.clientFactory
+      ? options.clientFactory({ cwd, options, brokerEndpoint })
+      : brokerEndpoint
+        ? new BrokerCodexAppServerClient(cwd, { ...options, brokerEndpoint })
+        : new SpawnedCodexAppServerClient(cwd, options);
+
+    try {
+      await client.initialize();
+    } catch (error) {
+      // initialize() failed AFTER the client spawned its `codex app-server`
+      // child / opened its socket. Close it before rethrowing so we never leak
+      // a live process, readline interface, or stderr listener.
+      await client.close().catch(() => {});
+      throw error;
+    }
     return client;
   }
 }

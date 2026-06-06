@@ -38,6 +38,33 @@ test("runTrackedJob interrupts the hung turn when the hard timeout fires", async
   assert.equal(record.timedOut, true);
 });
 
+test("runTrackedJob does not interrupt on timeout when only one of threadId/turnId is recorded", async () => {
+  const workspace = makeTempDir();
+  const jobId = "job-timeout-halfid";
+  const calls = [];
+
+  await assert.rejects(
+    runTrackedJob(
+      { id: jobId, workspaceRoot: workspace },
+      async () => {
+        // Only a threadId is recorded; interruptAppServerTurn needs both ids, so
+        // the timeout path must not pretend it can interrupt.
+        applyJobPatchIfActive(workspace, jobId, { threadId: "th-only" });
+        await new Promise(() => {});
+      },
+      {
+        timeoutMs: 40,
+        interruptOnTimeout: async (cwd, ctx) => {
+          calls.push({ cwd, ctx });
+        }
+      }
+    ),
+    /hard timeout/i
+  );
+
+  assert.equal(calls.length, 0, "interrupt requires both threadId and turnId");
+});
+
 test("runTrackedJob schedules a process-tree terminate on hard timeout so the worker can exit", async () => {
   const workspace = makeTempDir();
   const jobId = "job-timeout-kill";

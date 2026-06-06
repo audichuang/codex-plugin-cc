@@ -254,6 +254,87 @@ test("terminateHungJob is a no-op (no kill, no signal overwrite) when the job al
   );
 });
 
+function seedHungJob(workspace, jobId, overrides = {}) {
+  const logFile = resolveJobLogFile(workspace, jobId);
+  const job = {
+    id: jobId,
+    status: "running",
+    phase: "investigating",
+    pid: 999_999,
+    logFile,
+    threadId: "th",
+    turnId: "tn",
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+    ...overrides
+  };
+  writeJobFile(workspace, jobId, job);
+  saveState(workspace, { version: 1, config: { stopReviewGate: false }, jobs: [job] });
+  fs.writeFileSync(logFile, "", "utf8");
+  return logFile;
+}
+
+test("terminateHungJob escalates to terminating the broker when the interrupt does not confirm", async () => {
+  const workspace = makeTempDir();
+  const jobId = "job-escalate";
+  const logFile = seedHungJob(workspace, jobId);
+
+  const calls = { interrupt: [], terminate: [] };
+  const deps = {
+    interrupt: async (_cwd, ctx) => {
+      calls.interrupt.push(ctx);
+      return { attempted: true, interrupted: false, detail: "broker unreachable" };
+    },
+    terminate: (pid) => calls.terminate.push(pid),
+    readBrokerPid: () => 54_321
+  };
+  const observation = { status: "running", pid: 999_999, threadId: "th", turnId: "tn", logFile };
+
+  await terminateHungJob(workspace, jobId, observation, deps, "HUNG");
+
+  assert.ok(calls.terminate.includes(999_999), "must still kill the worker process tree");
+  assert.ok(
+    calls.terminate.includes(54_321),
+    "must escalate to the broker when the courtesy interrupt did not confirm (the turn runs in the broker's app-server child)"
+  );
+});
+
+test("terminateHungJob leaves the broker alone when the interrupt actually confirmed", async () => {
+  const workspace = makeTempDir();
+  const jobId = "job-confirmed";
+  const logFile = seedHungJob(workspace, jobId);
+
+  const calls = { terminate: [] };
+  const deps = {
+    interrupt: async () => ({ attempted: true, interrupted: true }),
+    terminate: (pid) => calls.terminate.push(pid),
+    readBrokerPid: () => 54_321
+  };
+  const observation = { status: "running", pid: 999_999, threadId: "th", turnId: "tn", logFile };
+
+  await terminateHungJob(workspace, jobId, observation, deps, "HUNG");
+
+  assert.deepEqual(calls.terminate, [999_999], "a confirmed interrupt must not escalate to killing the shared broker");
+});
+
+test("terminateHungJob does not interrupt when only one of threadId/turnId is present (interrupt needs both)", async () => {
+  const workspace = makeTempDir();
+  const jobId = "job-halfid";
+  const logFile = seedHungJob(workspace, jobId, { turnId: null });
+
+  const calls = { interrupt: [], terminate: [] };
+  const deps = {
+    interrupt: async (_cwd, ctx) => calls.interrupt.push(ctx),
+    terminate: (pid) => calls.terminate.push(pid)
+  };
+  const observation = { status: "running", pid: 999_999, threadId: "th-only", turnId: null, logFile };
+
+  await terminateHungJob(workspace, jobId, observation, deps, "HUNG");
+
+  assert.equal(calls.interrupt.length, 0, "interruptAppServerTurn no-ops without both ids, so the watchdog must not pretend it interrupted");
+  assert.deepEqual(calls.terminate, [999_999]);
+});
+
 test("runWatchdog escalates across ticks: one quiet tick, then terminate on the second", async () => {
   const workspace = makeTempDir();
   const jobId = "job-loop";

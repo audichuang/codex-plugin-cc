@@ -732,16 +732,16 @@ function resolveProviderConfig(configResponse) {
   }
 
   const providerId = normalizeProviderId(config.model_provider);
-  const providers =
-    config.model_providers && typeof config.model_providers === "object" && !Array.isArray(config.model_providers)
-      ? config.model_providers
-      : null;
-  const providerConfig =
-    providerId && providers?.[providerId] && typeof providers[providerId] === "object" ? providers[providerId] : null;
 
+  // The v2 `config/read` Config struct exposes only `model_provider` (a single
+  // id string) — there is NO `model_providers` map of per-provider settings, so
+  // a custom provider's friendly `name` is not available here. formatProviderLabel
+  // falls back to a built-in label or the raw id. (Previously this read a
+  // `config.model_providers` map that never exists, so providerConfig was always
+  // null — removed as dead code.)
   return {
     providerId,
-    providerConfig
+    providerConfig: null
   };
 }
 

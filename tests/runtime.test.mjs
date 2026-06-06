@@ -134,6 +134,13 @@ test("setup reports not ready when app-server config read fails", () => {
   assert.equal(payload.auth.loggedIn, false);
   assert.equal(payload.auth.source, "app-server");
   assert.match(payload.auth.detail, /config\/read failed for cwd/);
+  // requiresOpenaiAuth is unknown (null) here — we could not prove auth is
+  // unnecessary, so the report must still steer the user to log in.
+  assert.equal(payload.auth.requiresOpenaiAuth, null);
+  assert.ok(
+    payload.nextSteps.some((step) => /codex login/.test(step)),
+    `expected a login next-step when auth is unknown, got ${JSON.stringify(payload.nextSteps)}`
+  );
 });
 
 test("review renders a no-findings result from app-server review/start", () => {
@@ -637,15 +644,38 @@ test("task forwards model selection and reasoning effort to app-server turn/star
   run("git", ["add", "README.md"], { cwd: repo });
   run("git", ["commit", "-m", "init"], { cwd: repo });
 
-  const result = run("node", [SCRIPT, "task", "--model", "spark", "--effort", "low", "diagnose the failing test"], {
+  const result = run("node", [SCRIPT, "task", "--model", "gpt-5.3-codex", "--effort", "low", "diagnose the failing test"], {
     cwd: repo,
     env: buildEnv(binDir)
   });
 
   assert.equal(result.status, 0, result.stderr);
   const fakeState = JSON.parse(fs.readFileSync(statePath, "utf8"));
-  assert.equal(fakeState.lastTurnStart.model, "gpt-5.3-codex-spark");
+  // An explicit --model is forwarded verbatim; the plugin no longer rewrites or aliases model names.
+  assert.equal(fakeState.lastTurnStart.model, "gpt-5.3-codex");
   assert.equal(fakeState.lastTurnStart.effort, "low");
+});
+
+test("task does not alias 'spark' (the fabricated gpt-5.3-codex-spark slug is gone)", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  const statePath = path.join(binDir, "fake-codex-state.json");
+  installFakeCodex(binDir);
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+
+  const result = run("node", [SCRIPT, "task", "--model", "spark", "diagnose the failing test"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  const fakeState = JSON.parse(fs.readFileSync(statePath, "utf8"));
+  // "spark" is now an ordinary (unrecognized) model string forwarded verbatim,
+  // NOT silently rewritten to the non-existent gpt-5.3-codex-spark slug.
+  assert.equal(fakeState.lastTurnStart.model, "spark");
 });
 
 test("task defaults the model to gpt-5.5 and reasoning effort to xhigh when unspecified", () => {

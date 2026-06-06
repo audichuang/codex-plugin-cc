@@ -4,6 +4,7 @@ import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
 
 import { parseArgs } from "./lib/args.mjs";
 import { BROKER_BUSY_RPC_CODE, CodexAppServerClient } from "./lib/app-server.mjs";
@@ -168,6 +169,16 @@ async function main() {
         }
 
         if (message.id !== undefined && message.method === "broker/shutdown") {
+          if (shouldRefuseBrokerShutdown(activeStreamSocket, activeRequestSocket, socket)) {
+            send(socket, {
+              id: message.id,
+              error: buildJsonRpcError(
+                BROKER_BUSY_RPC_CODE,
+                "Shared Codex broker is busy serving another client; shutdown refused."
+              )
+            });
+            continue;
+          }
           send(socket, { id: message.id, result: {} });
           await shutdown(server);
           process.exit(0);
@@ -274,7 +285,24 @@ async function main() {
   });
 }
 
-main().catch((error) => {
-  process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
-  process.exit(1);
-});
+// Decide whether a broker/shutdown request must be refused. The shared broker
+// is per-workspace, so an unconditional shutdown from one client would tear
+// down a turn another client is still streaming. Refuse while a DIFFERENT
+// socket owns the active stream or request; allow when idle or when the
+// requester itself is the active owner.
+export function shouldRefuseBrokerShutdown(activeStreamSocket, activeRequestSocket, requestingSocket) {
+  return Boolean(
+    (activeStreamSocket && activeStreamSocket !== requestingSocket) ||
+      (activeRequestSocket && activeRequestSocket !== requestingSocket)
+  );
+}
+
+const invokedDirectly =
+  process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+
+if (invokedDirectly) {
+  main().catch((error) => {
+    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+    process.exit(1);
+  });
+}
