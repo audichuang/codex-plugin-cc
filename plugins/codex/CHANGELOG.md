@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.6
+
+- `/codex:handoff` now **sends the composed GPT-5.5 prompt to Codex by default**
+  and returns Codex's response (reflect → compose → run → bring back). Use
+  `--print` (or `--prompt-only`) to only emit the prompt to paste yourself;
+  `--background` runs it as a background job and `--write` lets a task edit code.
+  Mode A (session review) stays read-only.
+
 ## 1.0.5
 
 - Add the `/codex:handoff` command (build a paste-able GPT-5.5 prompt from the
