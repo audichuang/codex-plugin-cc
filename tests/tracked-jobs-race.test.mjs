@@ -5,8 +5,10 @@ import assert from "node:assert/strict";
 import { makeTempDir } from "./helpers.mjs";
 import {
   applyJobPatchIfActive,
+  loadState,
   resolveJobDoneFile,
   resolveJobFile,
+  upsertJob,
   writeCompletionSignalFile
 } from "../plugins/codex/scripts/lib/state.mjs";
 import { runTrackedJob } from "../plugins/codex/scripts/lib/tracked-jobs.mjs";
@@ -95,6 +97,32 @@ test("runTrackedJob still records completion + signal if the per-job file was pr
   assert.equal(record.status, "completed");
   assert.equal(record.rendered, "done");
   assert.equal(JSON.parse(fs.readFileSync(resolveJobDoneFile(workspace, jobId), "utf8")).status, "completed");
+});
+
+test("runTrackedJob success path does not clobber an index terminal record when the per-job file was pruned", async () => {
+  const workspace = makeTempDir();
+  const jobId = "job-pruned-but-finalized";
+
+  // The per-job file was pruned, but an external actor already finalized the
+  // job as failed in the index AND wrote its terminal .done. A late success
+  // must not resurrect it to completed: first terminal writer wins, even on
+  // the stored===null fallback path.
+  const runner = async () => {
+    fs.rmSync(resolveJobFile(workspace, jobId), { force: true });
+    upsertJob(workspace, { id: jobId, status: "failed", phase: "failed", pid: null });
+    writeCompletionSignalFile(workspace, jobId, { status: "failed", reason: "finalized elsewhere" });
+    return { exitStatus: 0, payload: { ok: 1 }, rendered: "late", summary: "late" };
+  };
+
+  await runTrackedJob({ id: jobId, workspaceRoot: workspace }, runner, {});
+
+  const indexJob = loadState(workspace).jobs.find((job) => job.id === jobId);
+  assert.equal(indexJob.status, "failed", "must not resurrect an index-finalized job to completed");
+  assert.equal(
+    JSON.parse(fs.readFileSync(resolveJobDoneFile(workspace, jobId), "utf8")).status,
+    "failed",
+    "must not overwrite an externally-written terminal signal"
+  );
 });
 
 test("runTrackedJob still writes the completed record + signal on the normal success path", async () => {

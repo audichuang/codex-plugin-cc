@@ -25,6 +25,7 @@ import { collectReviewContext, ensureGitRepository, resolveReviewTarget } from "
 import { binaryAvailable, terminateProcessTree } from "./lib/process.mjs";
 import { loadPromptTemplate, interpolateTemplate } from "./lib/prompts.mjs";
 import {
+  applyJobPatchIfActive,
   generateJobId,
   getConfig,
   listJobs,
@@ -974,39 +975,46 @@ async function handleCancel(argv) {
   appendLogLine(job.logFile, "Cancelled by user.");
 
   const completedAt = nowIso();
-  const nextJob = {
-    ...job,
+  const cancelPatch = {
     status: "cancelled",
     phase: "cancelled",
     pid: null,
     completedAt,
+    cancelledAt: completedAt,
     errorMessage: "Cancelled by user."
   };
 
-  writeJobFile(workspaceRoot, job.id, {
-    ...existing,
-    ...nextJob,
-    cancelledAt: completedAt
-  });
-  upsertJob(workspaceRoot, {
-    id: job.id,
-    status: "cancelled",
-    phase: "cancelled",
-    pid: null,
-    errorMessage: "Cancelled by user.",
-    completedAt
-  });
-  // Terminal signal so a monitor waiting on <jobId>.done wakes after a user
-  // cancellation (the watchdog also exits on terminal state, so it cannot
-  // backfill this signal).
-  writeCompletionSignalFile(workspaceRoot, job.id, {
-    status: "cancelled",
-    reason: "Cancelled by user."
-  });
+  // Route the durable write through the CAS so a job that finalized itself
+  // (the worker completed/failed during the interrupt await above — a real
+  // cross-process TOCTOU) is not clobbered back to "cancelled". First terminal
+  // writer wins, consistent with the runner, watchdog, and dead-PID reconcile.
+  const result = applyJobPatchIfActive(workspaceRoot, job.id, () => cancelPatch);
 
+  // Defensive fallback: the per-job file was pruned mid-flight (stored===null),
+  // so there is no terminal record to clobber — recreate the cancelled record.
+  if (!result.applied && result.stored === null) {
+    writeJobFile(workspaceRoot, job.id, { ...existing, ...job, ...cancelPatch });
+    upsertJob(workspaceRoot, { id: job.id, ...cancelPatch });
+  }
+
+  const finalizedAsCancelled = result.applied || result.stored === null;
+  const finalStatus = finalizedAsCancelled ? "cancelled" : result.stored?.status ?? "cancelled";
+
+  if (finalizedAsCancelled) {
+    // Terminal signal so a monitor waiting on <jobId>.done wakes after a user
+    // cancellation (the watchdog also exits on terminal state, so it cannot
+    // backfill this signal). Skipped when the CAS lost to an existing terminal
+    // state — that actor already wrote the authoritative signal.
+    writeCompletionSignalFile(workspaceRoot, job.id, {
+      status: "cancelled",
+      reason: "Cancelled by user."
+    });
+  }
+
+  const nextJob = { ...job, ...cancelPatch, status: finalStatus };
   const payload = {
     jobId: job.id,
-    status: "cancelled",
+    status: finalStatus,
     title: job.title,
     turnInterruptAttempted: interrupt.attempted,
     turnInterrupted: interrupt.interrupted

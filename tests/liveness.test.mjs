@@ -22,6 +22,39 @@ test("classifyLiveness reports DONE for a terminal job regardless of other signa
   }
 });
 
+test("classifyLiveness reports DONE for a terminal job even when its own deadline was missed", () => {
+  // Regression guard: the missedOwnDeadline check must never outrank the
+  // terminal-status and dead-worker checks, or a job that already reached a
+  // terminal state in the .done/terminal-write race would be misclassified as
+  // HUNG and needlessly interrupted.
+  for (const status of ["completed", "failed", "cancelled"]) {
+    assert.equal(
+      classifyLiveness({
+        status,
+        workerAlive: true,
+        quietMs: 0,
+        brokerOk: true,
+        missedOwnDeadline: true,
+        thresholds: THRESHOLDS
+      }),
+      "DONE",
+      `status=${status}`
+    );
+  }
+  // A dead worker still classifies DEAD (not HUNG) even past its deadline.
+  assert.equal(
+    classifyLiveness({
+      status: "running",
+      workerAlive: false,
+      quietMs: 0,
+      brokerOk: true,
+      missedOwnDeadline: true,
+      thresholds: THRESHOLDS
+    }),
+    "DEAD"
+  );
+});
+
 test("classifyLiveness reports DEAD when the worker process is gone", () => {
   const verdict = classifyLiveness({
     status: "running",

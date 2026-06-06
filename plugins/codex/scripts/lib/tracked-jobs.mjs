@@ -5,6 +5,7 @@ import { terminateProcessTree } from "./process.mjs";
 
 import {
   applyJobPatchIfActive,
+  loadState,
   readJobFile,
   resolveJobFile,
   resolveJobLogFile,
@@ -12,6 +13,17 @@ import {
   writeCompletionSignalFile,
   writeJobFile
 } from "./state.mjs";
+
+const TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled"]);
+
+// The stored===null fallbacks below recreate a terminal record when the per-job
+// file vanished (pruned mid-run). That recreate is only safe when no other
+// actor has already finalized the job in the shared index — otherwise a late
+// writer would resurrect a job that first-terminal-writer-wins already decided.
+function indexHasTerminalRecord(workspaceRoot, jobId) {
+  const entry = loadState(workspaceRoot).jobs.find((job) => job.id === jobId);
+  return Boolean(entry && TERMINAL_STATUSES.has(entry.status));
+}
 
 // Lazy import so this module never statically depends on the heavy app-server
 // stack (codex.mjs). Used only on the timeout path to ask Codex to abort a
@@ -243,7 +255,12 @@ export async function runTrackedJob(job, runner, options = {}) {
     // vanished (pruned while a silent long job was still alive), the CAS reads
     // stored===null and does not apply. Recreate the terminal record directly
     // so a successful run is not silently dropped — keeping the index light.
-    if (!result.applied && result.stored === null) {
+    // BUT only if no other actor already finalized the job in the index while
+    // the per-job file was gone; otherwise first-terminal-writer-wins and we
+    // must not resurrect their terminal state.
+    const recreateSuccess =
+      !result.applied && result.stored === null && !indexHasTerminalRecord(job.workspaceRoot, job.id);
+    if (recreateSuccess) {
       writeJobFile(job.workspaceRoot, job.id, {
         ...runningRecord,
         status: completionStatus,
@@ -267,7 +284,7 @@ export async function runTrackedJob(job, runner, options = {}) {
       });
     }
 
-    if (result.applied || result.stored === null) {
+    if (result.applied || recreateSuccess) {
       appendLogBlock(options.logFile ?? job.logFile ?? null, "Final output", execution.rendered);
       // Terminal signal so a monitor (Claude-side `until [ -f signalFile ]` loop
       // or the detached watchdog) learns the job finished and can surface the
@@ -331,8 +348,11 @@ export async function runTrackedJob(job, runner, options = {}) {
     // Defensive fallback: if the per-job file somehow went missing between
     // runningRecord write and now, the helper returns applied=false with
     // stored=null. Fall back to a direct write so the job does not silently
-    // disappear.
-    if (!result.applied && result.stored === null) {
+    // disappear — but only if no other actor already finalized it in the index
+    // (first-terminal-writer-wins; do not resurrect their terminal state).
+    const recreateFailure =
+      !result.applied && result.stored === null && !indexHasTerminalRecord(job.workspaceRoot, job.id);
+    if (recreateFailure) {
       writeJobFile(job.workspaceRoot, job.id, {
         ...runningRecord,
         ...failurePatch,
@@ -345,7 +365,7 @@ export async function runTrackedJob(job, runner, options = {}) {
     // actually wrote the failure. If the CAS lost because another actor already
     // finalized the job (e.g. user cancel, watchdog), do not stomp its terminal
     // signal with "failed".
-    if (result.applied || result.stored === null) {
+    if (result.applied || recreateFailure) {
       writeCompletionSignalFile(job.workspaceRoot, job.id, {
         status: "failed",
         reason: errorMessage
