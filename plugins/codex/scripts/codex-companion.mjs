@@ -71,6 +71,21 @@ const DEFAULT_STATUS_WAIT_TIMEOUT_MS = 240000;
 const DEFAULT_STATUS_POLL_INTERVAL_MS = 2000;
 const VALID_REASONING_EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh"]);
 const MODEL_ALIASES = new Map([["spark", "gpt-5.3-codex-spark"]]);
+
+// Defaults applied when the caller does not pass --model / --effort. Overridable
+// via env so a workspace can pin a different model or dial reasoning effort
+// down (the GPT-5.5 guide suggests re-evaluating lower effort before escalating).
+function resolveDefaultModel() {
+  const fromEnv = process.env.CODEX_DEFAULT_MODEL?.trim();
+  return fromEnv || "gpt-5.5";
+}
+function resolveDefaultEffort() {
+  const fromEnv = process.env.CODEX_DEFAULT_EFFORT?.trim().toLowerCase();
+  if (fromEnv && VALID_REASONING_EFFORTS.has(fromEnv)) {
+    return fromEnv;
+  }
+  return "xhigh";
+}
 const STOP_REVIEW_TASK_MARKER = "Run a stop-gate review of the previous Claude turn.";
 
 function printUsage() {
@@ -102,22 +117,22 @@ function outputCommandResult(payload, rendered, asJson) {
 
 function normalizeRequestedModel(model) {
   if (model == null) {
-    return null;
+    return resolveDefaultModel();
   }
   const normalized = String(model).trim();
   if (!normalized) {
-    return null;
+    return resolveDefaultModel();
   }
   return MODEL_ALIASES.get(normalized.toLowerCase()) ?? normalized;
 }
 
 function normalizeReasoningEffort(effort) {
   if (effort == null) {
-    return null;
+    return resolveDefaultEffort();
   }
   const normalized = String(effort).trim().toLowerCase();
   if (!normalized) {
-    return null;
+    return resolveDefaultEffort();
   }
   if (!VALID_REASONING_EFFORTS.has(normalized)) {
     throw new Error(
@@ -744,7 +759,7 @@ async function handleReviewCommand(argv, config) {
         cwd,
         base: options.base,
         scope: options.scope,
-        model: options.model,
+        model: normalizeRequestedModel(options.model),
         focusText,
         reviewName: config.reviewName,
         onProgress: progress
