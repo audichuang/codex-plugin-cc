@@ -135,13 +135,15 @@ I/O 邊界（`process.kill`、`fs.stat`、probe、`spawn`）一律以可注入 d
 對抗式複驗確認 6 個 review 修正全部成立、測試 meaningful，並額外發現並修正：
 
 - **補回 BLOCKER 1 移除 hard-ceiling 後的殘留 gap**：watchdog 改用 job 自身的 `timeoutAt` 偵測「worker 過了自己宣告的 deadline 仍未自我了結」（event-loop 卡死的情況），`gatherObservation` 算 `missedOwnDeadline`（過期 + 60s grace），`classifyLiveness` 據此判 HUNG。因為以 job 自己的 deadline 為界，**絕不誤殺仍在預算內工作的 turn**，同時封住「卡死但 broker 可達」對所有層都漏接的洞。
-- **success-path 反向 race guard**：`runTrackedJob` 成功分支寫終結記錄前先檢查 job 是否已被外部（watchdog/reconcile）標為 terminal；若是則不覆寫、不寫 completed signal（first-terminal-writer-wins），仍回傳 execution。
+- **success-path 反向 race**（第三輪 Codex review 修正）：`runTrackedJob` 成功分支改走 `applyJobPatchIfActive`（first-terminal-writer-wins），與其他終結寫入一致。Codex 給出可達的 schedule：worker event loop 同步阻塞過了 `timeoutAt`，解除後 runner 的 resolve 是 microtask、會在 timeout 的 macrotask 之前贏得 `Promise.race`，於是 success 分支在 wall-clock 已過 deadline 時仍執行；獨立進程的 watchdog 此時觀察到 `missedOwnDeadline` 並 CAS 寫 failed，落在 worker read→write 之間造成復活。改用 CAS 後若 job 已被外部終結則 `applied:false`、不覆寫記錄也不寫 completed signal。為避免 `state.json` 膨脹，擴充 `applyJobPatchIfActive` 接受可選的輕量 `indexPatch`：per-job 檔案存完整 `result`/`rendered`，索引只存輕量欄位。
+- **失敗路徑 `.done` 也 gate**：catch 只在 `result.applied || result.stored === null`（確實寫了 failure）時才寫 failed signal，CAS 輸了不覆寫別人的終結 signal。
 
 明確記錄、暫不處理（低機率、且屬既有架構）：
 - **cancel path TOCTOU**：`handleCancel` 選取已過濾 active，但選取到寫入間若 job 轉 terminal，'cancelled' 可能覆寫真正終結態。非-CAS 終結寫入為既有行為；難寫出決定性測試，依「不加未測程式碼」原則暫記為已知低機率 race。
 - **`.done` 非原子寫入（torn read）**：payload 目前不被讀取（monitor 只看存在性、`/codex:result` 讀權威 per-job JSON），YAGNI 暫不加 tmp+rename。
+- 註：以上殘留與 cancel TOCTOU 的根因都是「本 repo 無跨進程 file lock，`applyJobPatchIfActive` 僅保證單一 Node process 內原子」。真正消除需引入 file locking / O_EXCL commit token，屬更大的架構變更，目前以一致的 best-effort CAS 收斂、並把視窗縮到與全 repo 相同。
 
-最終 `node --test` 165 passing。
+最終 `node --test` 171 passing。
 
 ## 明確不要做
 

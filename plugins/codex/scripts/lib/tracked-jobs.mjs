@@ -206,50 +206,49 @@ export async function runTrackedJob(job, runner, options = {}) {
     }
     const completionStatus = execution.exitStatus === 0 ? "completed" : "failed";
     const completedAt = nowIso();
+    const phase = completionStatus === "completed" ? "done" : "failed";
 
-    // Reverse-race guard: if an external actor (watchdog / dead-PID reconcile)
-    // already moved this job to a terminal state, do not resurrect it back to
-    // "completed" nor clobber its terminal .done signal. The first terminal
-    // writer wins. We still return the execution to the caller.
-    let storedNow = null;
-    try {
-      storedNow = readJobFile(resolveJobFile(job.workspaceRoot, job.id));
-    } catch {
-      storedNow = null;
-    }
-    if (storedNow && storedNow.status !== "running" && storedNow.status !== "queued") {
-      return execution;
-    }
+    // First-terminal-writer-wins via the shared CAS. If an external actor
+    // (watchdog / dead-PID reconcile) already finalized this job in a race —
+    // including the event-loop-wedged case where the worker resolves success
+    // microtask-first after blowing past its own deadline — applied=false and
+    // we neither resurrect the record nor clobber its terminal .done. The heavy
+    // result/rendered go to the per-job file; the index stays light.
+    const result = applyJobPatchIfActive(
+      job.workspaceRoot,
+      job.id,
+      () => ({
+        status: completionStatus,
+        threadId: execution.threadId ?? null,
+        turnId: execution.turnId ?? null,
+        pid: null,
+        phase,
+        completedAt,
+        result: execution.payload,
+        rendered: execution.rendered
+      }),
+      null,
+      () => ({
+        status: completionStatus,
+        threadId: execution.threadId ?? null,
+        turnId: execution.turnId ?? null,
+        summary: execution.summary,
+        phase,
+        pid: null,
+        completedAt
+      })
+    );
 
-    writeJobFile(job.workspaceRoot, job.id, {
-      ...runningRecord,
-      status: completionStatus,
-      threadId: execution.threadId ?? null,
-      turnId: execution.turnId ?? null,
-      pid: null,
-      phase: completionStatus === "completed" ? "done" : "failed",
-      completedAt,
-      result: execution.payload,
-      rendered: execution.rendered
-    });
-    upsertJob(job.workspaceRoot, {
-      id: job.id,
-      status: completionStatus,
-      threadId: execution.threadId ?? null,
-      turnId: execution.turnId ?? null,
-      summary: execution.summary,
-      phase: completionStatus === "completed" ? "done" : "failed",
-      pid: null,
-      completedAt
-    });
-    appendLogBlock(options.logFile ?? job.logFile ?? null, "Final output", execution.rendered);
-    // Terminal signal so a monitor (Claude-side `until [ -f signalFile ]` loop
-    // or the detached watchdog) learns the background job finished and can
-    // surface the result instead of waiting forever.
-    writeCompletionSignalFile(job.workspaceRoot, job.id, {
-      status: completionStatus,
-      reason: completionStatus === "failed" ? execution.summary ?? null : null
-    });
+    if (result.applied) {
+      appendLogBlock(options.logFile ?? job.logFile ?? null, "Final output", execution.rendered);
+      // Terminal signal so a monitor (Claude-side `until [ -f signalFile ]` loop
+      // or the detached watchdog) learns the job finished and can surface the
+      // result instead of waiting forever.
+      writeCompletionSignalFile(job.workspaceRoot, job.id, {
+        status: completionStatus,
+        reason: completionStatus === "failed" ? execution.summary ?? null : null
+      });
+    }
     return execution;
   } catch (error) {
     if (timeoutHandle) {

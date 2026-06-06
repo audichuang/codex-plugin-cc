@@ -178,12 +178,17 @@ function defaultActivePredicate(stored) {
  * job that returns the patch. Return `null`/`undefined`/`false` from the
  * builder to skip the write (useful when the stored state already matches).
  *
+ * `indexPatchOrBuilder` (optional) lets a caller write a LIGHTER patch to the
+ * `state.json` index than to the per-job file. This keeps the index small
+ * (e.g. the success path stores `result`/`rendered` in the per-job file but
+ * not in the index). When omitted, the same patch goes to both (back-compat).
+ *
  * Returns `{ applied, stored, patch }`. `stored` is the persisted record
  * that was read (useful for reading log paths or prior metadata without
- * reopening the file). `patch` is what was actually written, including the
- * `updatedAt` timestamp the helper stamps on the index.
+ * reopening the file). `patch` is what was actually written to the per-job
+ * file, including the `updatedAt` timestamp the helper stamps.
  */
-export function applyJobPatchIfActive(cwd, jobId, patchOrBuilder, extraGuard = null) {
+export function applyJobPatchIfActive(cwd, jobId, patchOrBuilder, extraGuard = null, indexPatchOrBuilder = null) {
   const jobFile = resolveJobFile(cwd, jobId);
   let stored;
   try {
@@ -209,7 +214,14 @@ export function applyJobPatchIfActive(cwd, jobId, patchOrBuilder, extraGuard = n
   const patch = { ...rawPatch, updatedAt };
 
   writeJobFile(cwd, jobId, { ...stored, ...patch });
-  upsertJob(cwd, { id: jobId, ...patch });
+
+  if (indexPatchOrBuilder == null) {
+    upsertJob(cwd, { id: jobId, ...patch });
+  } else {
+    const indexRaw =
+      typeof indexPatchOrBuilder === "function" ? indexPatchOrBuilder(stored) : indexPatchOrBuilder;
+    upsertJob(cwd, { id: jobId, ...indexRaw, updatedAt });
+  }
 
   return { applied: true, stored, patch };
 }
