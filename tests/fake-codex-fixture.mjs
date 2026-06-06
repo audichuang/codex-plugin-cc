@@ -582,8 +582,19 @@ rl.on("line", (line) => {
 
 export function buildEnv(binDir) {
   const sep = process.platform === "win32" ? ";" : ":";
-  return {
+  const env = {
     ...process.env,
     PATH: `${binDir}${sep}${process.env.PATH}`
   };
+  // Keep runtime tests deterministic across developer machines: drop ambient
+  // CODEX_* tuning knobs (e.g. a tiny CODEX_JOB_TIMEOUT_MS or a custom watchdog
+  // interval) so the spawned companion always uses its documented defaults.
+  // CLAUDE_PLUGIN_DATA is deliberately left intact so the test process and the
+  // spawned companion resolve the same per-workspace state directory.
+  for (const key of Object.keys(env)) {
+    if (key.startsWith("CODEX_")) {
+      delete env[key];
+    }
+  }
+  return env;
 }

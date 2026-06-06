@@ -16,13 +16,28 @@ import {
   writeJobFile
 } from "../plugins/codex/scripts/lib/state.mjs";
 
-test("resolveStateDir uses a temp-backed per-workspace directory", () => {
+test("resolveStateDir uses a temp-backed per-workspace directory when CLAUDE_PLUGIN_DATA is unset", () => {
   const workspace = makeTempDir();
-  const stateDir = resolveStateDir(workspace);
+  // This test asserts the temp-backed FALLBACK, which only applies when
+  // CLAUDE_PLUGIN_DATA is not set. A real plugin install (or a Claude Code
+  // session) sets CLAUDE_PLUGIN_DATA to a $HOME path, which would otherwise
+  // make `startsWith(os.tmpdir())` fail — so control it here for determinism.
+  const previousPluginDataDir = process.env.CLAUDE_PLUGIN_DATA;
+  delete process.env.CLAUDE_PLUGIN_DATA;
 
-  assert.equal(stateDir.startsWith(os.tmpdir()), true);
-  assert.match(path.basename(stateDir), /.+-[a-f0-9]{16}$/);
-  assert.match(stateDir, new RegExp(`^${os.tmpdir().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+  try {
+    const stateDir = resolveStateDir(workspace);
+
+    assert.equal(stateDir.startsWith(os.tmpdir()), true);
+    assert.match(path.basename(stateDir), /.+-[a-f0-9]{16}$/);
+    assert.match(stateDir, new RegExp(`^${os.tmpdir().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+  } finally {
+    if (previousPluginDataDir == null) {
+      delete process.env.CLAUDE_PLUGIN_DATA;
+    } else {
+      process.env.CLAUDE_PLUGIN_DATA = previousPluginDataDir;
+    }
+  }
 });
 
 test("resolveStateDir uses CLAUDE_PLUGIN_DATA when it is provided", () => {
