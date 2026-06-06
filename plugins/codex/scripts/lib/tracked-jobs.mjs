@@ -239,7 +239,35 @@ export async function runTrackedJob(job, runner, options = {}) {
       })
     );
 
-    if (result.applied) {
+    // Defensive fallback (mirror of the failure path): if the per-job file
+    // vanished (pruned while a silent long job was still alive), the CAS reads
+    // stored===null and does not apply. Recreate the terminal record directly
+    // so a successful run is not silently dropped — keeping the index light.
+    if (!result.applied && result.stored === null) {
+      writeJobFile(job.workspaceRoot, job.id, {
+        ...runningRecord,
+        status: completionStatus,
+        threadId: execution.threadId ?? null,
+        turnId: execution.turnId ?? null,
+        pid: null,
+        phase,
+        completedAt,
+        result: execution.payload,
+        rendered: execution.rendered
+      });
+      upsertJob(job.workspaceRoot, {
+        id: job.id,
+        status: completionStatus,
+        threadId: execution.threadId ?? null,
+        turnId: execution.turnId ?? null,
+        summary: execution.summary,
+        phase,
+        pid: null,
+        completedAt
+      });
+    }
+
+    if (result.applied || result.stored === null) {
       appendLogBlock(options.logFile ?? job.logFile ?? null, "Final output", execution.rendered);
       // Terminal signal so a monitor (Claude-side `until [ -f signalFile ]` loop
       // or the detached watchdog) learns the job finished and can surface the

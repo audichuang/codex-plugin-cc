@@ -76,6 +76,27 @@ test("runTrackedJob still writes a failed signal on a normal (no-race) failure",
   assert.equal(JSON.parse(fs.readFileSync(resolveJobDoneFile(workspace, jobId), "utf8")).status, "failed");
 });
 
+test("runTrackedJob still records completion + signal if the per-job file was pruned mid-run", async () => {
+  const workspace = makeTempDir();
+  const jobId = "job-pruned-success";
+
+  // Simulate the per-job file being pruned (e.g. >50 newer jobs appeared) while
+  // a silent long-running job was still alive, then the runner succeeds. The
+  // success path must recreate the terminal record + .done (mirror of the
+  // failure-path fallback) so a monitor does not hang.
+  const runner = async () => {
+    fs.rmSync(resolveJobFile(workspace, jobId), { force: true });
+    return { exitStatus: 0, payload: { ok: 1 }, rendered: "done", summary: "done" };
+  };
+
+  await runTrackedJob({ id: jobId, workspaceRoot: workspace }, runner, {});
+
+  const record = JSON.parse(fs.readFileSync(resolveJobFile(workspace, jobId), "utf8"));
+  assert.equal(record.status, "completed");
+  assert.equal(record.rendered, "done");
+  assert.equal(JSON.parse(fs.readFileSync(resolveJobDoneFile(workspace, jobId), "utf8")).status, "completed");
+});
+
 test("runTrackedJob still writes the completed record + signal on the normal success path", async () => {
   const workspace = makeTempDir();
   const jobId = "job-normal-success";
