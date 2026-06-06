@@ -52,13 +52,26 @@ function cleanCodexStderr(stderr) {
     .join("\n");
 }
 
+// Resolve the sandbox mode for a Codex thread. The plugin defaults to the
+// safe per-command choice (read-only / workspace-write), but a host can force a
+// mode via CODEX_SANDBOX_MODE. This is the escape hatch for environments where
+// Codex's own bwrap sandbox cannot start — e.g. nested sandboxes/containers that
+// forbid creating a network namespace (`unshare --net` -> EPERM), where even
+// `read-only` aborts with "bwrap: loopback: Failed RTM_NEWADDR". Setting
+// CODEX_SANDBOX_MODE=danger-full-access skips bwrap; isolation is then provided
+// by the outer environment.
+export function resolveSandboxMode(requested) {
+  const override = process.env.CODEX_SANDBOX_MODE?.trim();
+  return override || requested || "read-only";
+}
+
 /** @returns {ThreadStartParams} */
 function buildThreadParams(cwd, options = {}) {
   return {
     cwd,
     model: options.model ?? null,
     approvalPolicy: options.approvalPolicy ?? "never",
-    sandbox: options.sandbox ?? "read-only",
+    sandbox: resolveSandboxMode(options.sandbox),
     serviceName: SERVICE_NAME,
     ephemeral: options.ephemeral ?? true,
     experimentalRawEvents: false
@@ -72,7 +85,7 @@ function buildResumeParams(threadId, cwd, options = {}) {
     cwd,
     model: options.model ?? null,
     approvalPolicy: options.approvalPolicy ?? "never",
-    sandbox: options.sandbox ?? "read-only"
+    sandbox: resolveSandboxMode(options.sandbox)
   };
 }
 

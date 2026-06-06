@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.0.7
+
+- Add a `CODEX_SANDBOX_MODE` escape hatch. Codex normally runs commands in its
+  own `bwrap` sandbox, which needs to create a network namespace; on hosts that
+  forbid that (nested sandboxes / some containers, where `unshare --net` returns
+  EPERM) even a `read-only` turn aborts with `bwrap: loopback: Failed
+  RTM_NEWADDR` and Codex can't read the repo. Setting
+  `CODEX_SANDBOX_MODE=danger-full-access` makes the plugin pass that sandbox mode
+  to Codex so it skips bwrap; isolation is then provided by the outer
+  environment. The per-command default (read-only / workspace-write) is
+  unchanged when the variable is unset.
+
 ## 1.0.6
 
 - `/codex:handoff` now **sends the composed GPT-5.5 prompt to Codex by default**
