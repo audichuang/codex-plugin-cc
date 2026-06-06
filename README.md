@@ -162,6 +162,22 @@ Ask Codex to redesign the database connection to be more resilient.
 - if you say `spark`, the plugin maps that to `gpt-5.3-codex-spark`
 - follow-up rescue requests can continue the latest Codex task in the repo
 
+### `/codex:execute-plan`
+
+Reads a plan file and hands it to Codex to implement with write access. Pass a plan path (or let it find `**/*PLAN*.md`); use `--background` for substantial plans, then `/codex:status` and `/codex:result`.
+
+### `/codex:handoff`
+
+Builds a complete GPT-5.5 prompt for you to paste into Codex — it only produces the prompt, it does not run Codex.
+
+- with no arguments, it reflects on the work done in this session (via `git diff`/`git log` and the conversation) and produces a prompt asking Codex to **review** that work, with the changed files listed as absolute paths.
+- with arguments, it treats them as the task and builds a GPT-5.5 prompt tailored to the task type (code review, document analysis, research, rewrite, or agentic), following the `gpt-5-5-prompting` methodology.
+
+```text
+/codex:handoff
+/codex:handoff research whether our retry strategy can duplicate side effects
+```
+
 ### `/codex:status`
 
 Shows running and recent Codex jobs for the current repository.
