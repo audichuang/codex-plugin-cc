@@ -3,11 +3,25 @@ import process from "node:process";
 
 import {
   applyJobPatchIfActive,
+  readJobFile,
+  resolveJobFile,
   resolveJobLogFile,
   upsertJob,
   writeCompletionSignalFile,
   writeJobFile
 } from "./state.mjs";
+
+// Lazy import so this module never statically depends on the heavy app-server
+// stack (codex.mjs). Used only on the timeout path to ask Codex to abort a
+// turn that is almost certainly hung.
+async function defaultInterruptOnTimeout(cwd, ctx) {
+  try {
+    const { interruptAppServerTurn } = await import("./codex.mjs");
+    await interruptAppServerTurn(cwd, ctx);
+  } catch {
+    // Best effort — the job is being marked failed regardless.
+  }
+}
 
 export const SESSION_ID_ENV = "CODEX_COMPANION_SESSION_ID";
 export const JOB_TIMEOUT_ENV = "CODEX_JOB_TIMEOUT_MS";
@@ -176,7 +190,7 @@ export async function runTrackedJob(job, runner, options = {}) {
     timeoutHandle = setTimeout(() => {
       timedOut = true;
       reject(new Error(
-        `Tracked job ${job.id} exceeded the ${formatTimeoutHuman(timeoutMs)} hard timeout; the job record was marked failed. The underlying runner was not cancelled and may still be executing in the background — kill it manually if it keeps consuming resources.`
+        `Tracked job ${job.id} exceeded the ${formatTimeoutHuman(timeoutMs)} hard timeout; the job record was marked failed and the Codex turn was sent an interrupt. If it keeps consuming resources, kill it manually.`
       ));
     }, timeoutMs);
     timeoutHandle.unref?.();
@@ -226,6 +240,27 @@ export async function runTrackedJob(job, runner, options = {}) {
       timeoutHandle = null;
     }
     const errorMessage = error instanceof Error ? error.message : String(error);
+
+    // On a hard timeout the runner is still pending and the underlying Codex
+    // turn is almost certainly hung. Best-effort interrupt it (using the
+    // thread/turn the progress updater recorded on the job) so Codex stops
+    // working instead of being orphaned. Only on timeout — a normal failure
+    // already unwound the turn.
+    if (timedOut) {
+      const interrupt = options.interruptOnTimeout ?? defaultInterruptOnTimeout;
+      try {
+        const stored = readJobFile(resolveJobFile(job.workspaceRoot, job.id));
+        if (stored?.threadId || stored?.turnId) {
+          await interrupt(job.cwd ?? job.workspaceRoot, {
+            threadId: stored.threadId ?? null,
+            turnId: stored.turnId ?? null
+          });
+        }
+      } catch {
+        // Best effort; never let interrupt failures mask the original error.
+      }
+    }
+
     const completedAt = nowIso();
     const failurePatch = {
       status: "failed",
