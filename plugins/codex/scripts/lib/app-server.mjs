@@ -53,7 +53,17 @@ function createProtocolError(message, data) {
   return error;
 }
 
-class AppServerClientBase {
+const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
+
+export function resolveRequestTimeoutMs(env = process.env) {
+  const value = Number(env.CODEX_REQUEST_TIMEOUT_MS);
+  if (!Number.isFinite(value) || value < 0) {
+    return DEFAULT_REQUEST_TIMEOUT_MS;
+  }
+  return Math.trunc(value); // 0 disables the per-request timeout
+}
+
+export class AppServerClientBase {
   constructor(cwd, options = {}) {
     this.cwd = cwd;
     this.options = options;
@@ -82,7 +92,7 @@ class AppServerClientBase {
    * @param {import("./app-server-protocol").AppServerRequestParams<M>} params
    * @returns {Promise<import("./app-server-protocol").AppServerResponse<M>>}
    */
-  request(method, params) {
+  request(method, params, options = {}) {
     if (this.closed) {
       throw new Error("codex app-server client is closed.");
     }
@@ -90,8 +100,27 @@ class AppServerClientBase {
     const id = this.nextId;
     this.nextId += 1;
 
+    const timeoutMs = Number.isFinite(options.timeoutMs)
+      ? options.timeoutMs
+      : resolveRequestTimeoutMs(this.options?.env ?? process.env);
+
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject, method });
+      const entry = { resolve, reject, method, timer: null };
+      // Layer-0 backstop: a wedged broker can accept the socket but never
+      // answer (startup races, a hung upstream). Without this the request
+      // promise — and any awaiter — would hang forever. The long-running turn
+      // is tracked via state.completion, not a request, so this never cuts a
+      // working turn short.
+      if (timeoutMs > 0) {
+        entry.timer = setTimeout(() => {
+          if (this.pending.get(id) === entry) {
+            this.pending.delete(id);
+            reject(new Error(`codex app-server request '${method}' timed out after ${timeoutMs}ms`));
+          }
+        }, timeoutMs);
+        entry.timer.unref?.();
+      }
+      this.pending.set(id, entry);
       this.sendMessage({ id, method, params });
     });
   }
@@ -138,6 +167,9 @@ class AppServerClientBase {
         return;
       }
       this.pending.delete(message.id);
+      if (pending.timer) {
+        clearTimeout(pending.timer);
+      }
 
       if (message.error) {
         pending.reject(createProtocolError(message.error.message ?? `codex app-server ${pending.method} failed.`, message.error));
@@ -168,6 +200,9 @@ class AppServerClientBase {
     this.exitError = error ?? null;
 
     for (const pending of this.pending.values()) {
+      if (pending.timer) {
+        clearTimeout(pending.timer);
+      }
       pending.reject(this.exitError ?? new Error("codex app-server connection closed."));
     }
     this.pending.clear();

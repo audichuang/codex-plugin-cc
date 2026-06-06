@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 
 import fs from "node:fs";
+import path from "node:path";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
 
 import { terminateProcessTree } from "./lib/process.mjs";
 import { BROKER_ENDPOINT_ENV } from "./lib/app-server.mjs";
@@ -13,7 +15,13 @@ import {
   sendBrokerShutdown,
   teardownBrokerSession
 } from "./lib/broker-lifecycle.mjs";
-import { loadState, resolveStateFile, saveState } from "./lib/state.mjs";
+import {
+  applyJobPatchIfActive,
+  loadState,
+  resolveStateFile,
+  saveState,
+  writeCompletionSignalFile
+} from "./lib/state.mjs";
 import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
 
 export const SESSION_ID_ENV = "CODEX_COMPANION_SESSION_ID";
@@ -50,26 +58,49 @@ function cleanupSessionJobs(cwd, sessionId) {
   }
 
   const state = loadState(workspaceRoot);
-  const removedJobs = state.jobs.filter((job) => job.sessionId === sessionId);
-  if (removedJobs.length === 0) {
+  const sessionJobs = state.jobs.filter((job) => job.sessionId === sessionId);
+  if (sessionJobs.length === 0) {
     return;
   }
 
-  for (const job of removedJobs) {
+  const completedAt = new Date().toISOString();
+  const keptIds = new Set();
+
+  for (const job of sessionJobs) {
     const stillRunning = job.status === "queued" || job.status === "running";
     if (!stillRunning) {
-      continue;
+      continue; // terminal session jobs are cleaned up (removed) below
     }
     try {
       terminateProcessTree(job.pid ?? Number.NaN);
     } catch {
       // Ignore teardown failures during session shutdown.
     }
+    // Mark the killed job failed and emit a .done signal so a result query
+    // returns a clear reason — and any monitor waiting on the signal stops —
+    // instead of the job silently vanishing from state.
+    const reason = "Session ended before the Codex job completed; marked failed.";
+    const result = applyJobPatchIfActive(workspaceRoot, job.id, () => ({
+      status: "failed",
+      phase: "failed",
+      pid: null,
+      completedAt,
+      errorMessage: reason,
+      endedBySession: true
+    }));
+    if (result.applied) {
+      writeCompletionSignalFile(workspaceRoot, job.id, { status: "failed", reason });
+      keptIds.add(job.id);
+    }
   }
 
+  // Reload to pick up the failed transitions, then drop the terminal session
+  // jobs while retaining the ones we just marked failed (so /codex:result can
+  // still surface them and their .done signal is not pruned).
+  const fresh = loadState(workspaceRoot);
   saveState(workspaceRoot, {
-    ...state,
-    jobs: state.jobs.filter((job) => job.sessionId !== sessionId)
+    ...fresh,
+    jobs: fresh.jobs.filter((job) => job.sessionId !== sessionId || keptIds.has(job.id))
   });
 }
 
@@ -125,7 +156,14 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
-  process.exit(1);
-});
+const invokedDirectly =
+  process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+
+if (invokedDirectly) {
+  main().catch((error) => {
+    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+    process.exit(1);
+  });
+}
+
+export { cleanupSessionJobs };
