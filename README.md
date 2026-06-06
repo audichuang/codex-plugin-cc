@@ -168,13 +168,15 @@ Reads a plan file and hands it to Codex to implement with write access. Pass a p
 
 ### `/codex:handoff`
 
-Builds a complete GPT-5.5 prompt for you to paste into Codex — it only produces the prompt, it does not run Codex.
+Builds a complete GPT-5.5 prompt and, by default, **sends it to Codex and returns Codex's response** — the one-key "reflect → ask Codex → bring it back" loop. The prompt is composed with the internal `gpt-5-5-prompting` methodology and runs through the same task runner (defaulting to `gpt-5.5` / `xhigh`).
 
-- with no arguments, it reflects on the work done in this session (via `git diff`/`git log` and the conversation) and produces a prompt asking Codex to **review** that work, with the changed files listed as absolute paths.
-- with arguments, it treats them as the task and builds a GPT-5.5 prompt tailored to the task type (code review, document analysis, research, rewrite, or agentic), following the `gpt-5-5-prompting` methodology.
+- with no arguments, it reflects on the work done in this session (via `git diff`/`git log` and the conversation) and asks Codex to **review** that work (read-only), with the changed files listed as absolute paths.
+- with arguments, it treats them as the task and builds a GPT-5.5 prompt tailored to the task type (code review, document analysis, research, rewrite, or agentic).
+- `--print` (or `--prompt-only`) skips the run and just emits the prompt for you to paste yourself; `--background` runs it as a background job (check `/codex:status`, `/codex:result`); `--write` lets a task edit code.
 
 ```text
 /codex:handoff
+/codex:handoff --print
 /codex:handoff research whether our retry strategy can duplicate side effects
 ```
 

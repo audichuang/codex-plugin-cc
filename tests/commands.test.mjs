@@ -85,13 +85,16 @@ test("continue is not exposed as a user-facing command", () => {
   ]);
 });
 
-test("handoff command builds a paste-able GPT-5.5 prompt and never runs Codex", () => {
+test("handoff builds a GPT-5.5 prompt and sends it to Codex by default, with --print to only emit it", () => {
   const source = read("commands/handoff.md");
   assert.match(source, /argument-hint:/);
   assert.match(source, /allowed-tools:.*Skill/);
+  assert.match(source, /allowed-tools:.*Bash\(node:\*\)/);
   assert.match(source, /gpt-5-5-prompting/);
-  assert.match(source, /only \*\*produces the prompt\*\*/i);
-  assert.match(source, /Do NOT run Codex/i);
+  // Default behavior: send the built prompt to Codex via the companion task runner.
+  assert.match(source, /codex-companion\.mjs" task --prompt-file/);
+  // --print (or --prompt-only) emits the prompt without running Codex.
+  assert.match(source, /--print/);
   assert.match(source, /```text/);
   // Mode A reflects on the session's work via git; Mode B builds for a given task.
   assert.match(source, /git --no-pager diff/);
