@@ -589,8 +589,10 @@ export function buildEnv(binDir) {
   // Keep runtime tests deterministic across developer machines: drop ambient
   // CODEX_* tuning knobs (e.g. a tiny CODEX_JOB_TIMEOUT_MS or a custom watchdog
   // interval) so the spawned companion always uses its documented defaults.
-  // CLAUDE_PLUGIN_DATA is deliberately left intact so the test process and the
-  // spawned companion resolve the same per-workspace state directory.
+  // CLAUDE_PLUGIN_DATA is inherited from process.env on purpose — helpers.mjs has
+  // already redirected it to a throwaway dir, so the test process and the spawned
+  // companion resolve the SAME isolated per-workspace state directory (never the
+  // developer's real plugin data).
   for (const key of Object.keys(env)) {
     if (key.startsWith("CODEX_")) {
       delete env[key];

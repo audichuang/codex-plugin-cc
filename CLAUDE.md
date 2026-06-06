@@ -15,7 +15,7 @@ node scripts/bump-version.mjs --check    # verify all version sites match
 npm run build                            # tsc; prebuild regens app-server types via `codex app-server generate-ts`
 ```
 
-- **Run tests with a clean env:** `env -u CODEX_COMPANION_SESSION_ID -u CODEX_HOME -u CODEX_API_KEY npm test`. The suite is **not hermetic** against ambient env — `setup` tests run with `cwd=repo` and inherit `CLAUDE_PLUGIN_DATA`, so a leftover `broker.json` from a real Codex run in this repo makes them fail with "Shared Codex broker is busy". If setup tests fail mysteriously, clear `$CLAUDE_PLUGIN_DATA/state/<repo-slug-hash>/broker.json`.
+- **`npm test` is hermetic** — `tests/helpers.mjs` redirects `CLAUDE_PLUGIN_DATA` to a throwaway temp dir and drops ambient `CODEX_*` at import, so the suite passes regardless of ambient env and never reads/writes the real `~/.claude/plugins/data/...`. Don't reintroduce a dependency on ambient env; keep new tests importing `helpers.mjs` so they inherit the isolation.
 
 ## Architecture (`plugins/codex/`)
 

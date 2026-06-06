@@ -4,6 +4,29 @@ import path from "node:path";
 import process from "node:process";
 import { spawnSync } from "node:child_process";
 
+// Hermetic state isolation. state.mjs resolves its per-workspace state dir under
+// CLAUDE_PLUGIN_DATA; if that points at the developer's real plugin data
+// (~/.claude/plugins/data/...), tests write broker.json/state.json there and
+// spawn brokers that collide with real Codex runs in this repo — the source of
+// the "Shared Codex broker is busy" setup-test flakes and the stray test brokers
+// left behind. Redirect it to a throwaway dir for the whole test process. Both
+// the test process and any companion subprocess (buildEnv spreads process.env)
+// then share this isolated root, and `node --test` runs each file in its own
+// process, so this is per-file isolation. Tests that exercise CLAUDE_PLUGIN_DATA
+// directly (state.test.mjs) still save/restore around their own changes.
+process.env.CLAUDE_PLUGIN_DATA = fs.mkdtempSync(path.join(os.tmpdir(), "codex-plugin-data-"));
+
+// Also drop ambient CODEX_* knobs from the test process itself (buildEnv already
+// does this for spawned companions). Otherwise an ambient CODEX_COMPANION_SESSION_ID
+// makes in-process, session-filtered status/result reads see "no jobs", and
+// tuning knobs (CODEX_JOB_TIMEOUT_MS, watchdog intervals) make timing
+// nondeterministic. Tests that need any of these set them explicitly.
+for (const key of Object.keys(process.env)) {
+  if (key.startsWith("CODEX_")) {
+    delete process.env[key];
+  }
+}
+
 export function makeTempDir(prefix = "codex-plugin-test-") {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 }
