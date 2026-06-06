@@ -1,7 +1,13 @@
 import fs from "node:fs";
 import process from "node:process";
 
-import { applyJobPatchIfActive, resolveJobLogFile, upsertJob, writeJobFile } from "./state.mjs";
+import {
+  applyJobPatchIfActive,
+  resolveJobLogFile,
+  upsertJob,
+  writeCompletionSignalFile,
+  writeJobFile
+} from "./state.mjs";
 
 export const SESSION_ID_ENV = "CODEX_COMPANION_SESSION_ID";
 export const JOB_TIMEOUT_ENV = "CODEX_JOB_TIMEOUT_MS";
@@ -206,6 +212,13 @@ export async function runTrackedJob(job, runner, options = {}) {
       completedAt
     });
     appendLogBlock(options.logFile ?? job.logFile ?? null, "Final output", execution.rendered);
+    // Terminal signal so a monitor (Claude-side `until [ -f signalFile ]` loop
+    // or the detached watchdog) learns the background job finished and can
+    // surface the result instead of waiting forever.
+    writeCompletionSignalFile(job.workspaceRoot, job.id, {
+      status: completionStatus,
+      reason: completionStatus === "failed" ? execution.summary ?? null : null
+    });
     return execution;
   } catch (error) {
     if (timeoutHandle) {
@@ -248,6 +261,12 @@ export async function runTrackedJob(job, runner, options = {}) {
       });
       upsertJob(job.workspaceRoot, { id: job.id, ...failurePatch });
     }
+    // Terminal signal on the failure path too, so a waiting monitor stops and
+    // the failure reason can be surfaced rather than hanging.
+    writeCompletionSignalFile(job.workspaceRoot, job.id, {
+      status: "failed",
+      reason: errorMessage
+    });
     throw error;
   }
 }

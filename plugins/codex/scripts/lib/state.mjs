@@ -110,6 +110,7 @@ export function saveState(cwd, state) {
     }
     removeJobFile(resolveJobFile(cwd, job.id));
     removeFileIfExists(job.logFile);
+    removeFileIfExists(resolveJobDoneFile(cwd, job.id));
   }
 
   fs.writeFileSync(resolveStateFile(cwd), `${JSON.stringify(nextState, null, 2)}\n`, "utf8");
@@ -329,4 +330,28 @@ export function resolveJobLogFile(cwd, jobId) {
 export function resolveJobFile(cwd, jobId) {
   ensureStateDir(cwd);
   return path.join(resolveJobsDir(cwd), `${jobId}.json`);
+}
+
+export function resolveJobDoneFile(cwd, jobId) {
+  ensureStateDir(cwd);
+  return path.join(resolveJobsDir(cwd), `${jobId}.done`);
+}
+
+/**
+ * Writes a terminal "done" signal file for a job. A monitor (the Claude-side
+ * `until [ -f signalFile ]` loop, or the detached watchdog) tails this file to
+ * learn that a background job has reached a terminal state, so a completed or
+ * failed job surfaces instead of leaving the caller waiting forever. The
+ * payload mirrors the job record's terminal status plus a human-readable
+ * reason for failures.
+ */
+export function writeCompletionSignalFile(cwd, jobId, signal = {}) {
+  const doneFile = resolveJobDoneFile(cwd, jobId);
+  const payload = {
+    status: signal.status ?? "completed",
+    reason: signal.reason ?? null,
+    signaledAt: nowIso()
+  };
+  fs.writeFileSync(doneFile, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+  return doneFile;
 }
