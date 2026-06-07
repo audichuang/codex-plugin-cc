@@ -1,0 +1,23 @@
+[
+  {"query": "does codex's app-server actually push a heartbeat while a turn is running, or can it just go silent for minutes? trying to decide if my idle-detection is even necessary", "should_trigger": true},
+  {"query": "where in the codex rust code does turn/interrupt actually abort the running turn? need to confirm it's cooperative and not a hard process kill", "should_trigger": true},
+  {"query": "what's codex's default stream idle timeout and does it retry? i think it's ~5 min but i want it verified against the actual source, not the docs", "should_trigger": true},
+  {"query": "if the JSON-RPC client socket drops mid-turn, does codex abort the turn server-side or does it keep running? need the real behavior from codex-rs", "should_trigger": true},
+  {"query": "i'm honestly not sure whether turn/start blocks until the model finishes — can you check the real codex source rather than guessing", "should_trigger": true},
+  {"query": "what notifications does the codex app-server emit during a turn? is there a literal 'agentMessage' method or does the final answer come as item/completed? i need the exact wire names from the protocol crate", "should_trigger": true},
+  {"query": "does terminating the codex worker process actually stop the turn, or does it keep running inside the app-server? confirm from the rust", "should_trigger": true},
+  {"query": "trace how a UserInput submission flows through the codex core session loop to the model and back as events", "should_trigger": true},
+  {"query": "what grace period does codex wait after cancelling a task before it hard-aborts the tokio task? looking for the constant in core/src/tasks", "should_trigger": true},
+  {"query": "how does codex decide to skip bwrap and the network namespace? i want to read the actual sandboxing rust to understand the loopback failure", "should_trigger": true},
+
+  {"query": "is our cleanupSessionJobs change in session-lifecycle-hook.mjs correct? did we miss anything in the SessionEnd broker teardown ordering?", "should_trigger": false},
+  {"query": "write a hermetic test for the new pruneJobs behavior so it doesn't touch the real ~/.claude and doesn't flake on timers", "should_trigger": false},
+  {"query": "codex login keeps failing with a 'bwrap: loopback: Failed RTM_NEWADDR' error on my container, how do i actually get it to run", "should_trigger": false},
+  {"query": "where in our codex-companion.mjs do we build the turn/start params and set the model + effort?", "should_trigger": false},
+  {"query": "help me write a tight gpt-5.5 prompt for a codex rescue task that's an adversarial review of my diff", "should_trigger": false},
+  {"query": "run a codex review on my uncommitted changes and tell me if it's safe to merge", "should_trigger": false},
+  {"query": "bump the plugin version to 1.0.18 and update the changelog for the prune fix", "should_trigger": false},
+  {"query": "what's the per-token pricing for claude opus 4.8 vs sonnet for a long agent run?", "should_trigger": false},
+  {"query": "update CLAUDE.md to document the /codex:attach command and the idle watchdog env var", "should_trigger": false},
+  {"query": "explain in general how rust's tokio select! macro picks a branch when two futures are ready", "should_trigger": false}
+]
