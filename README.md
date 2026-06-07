@@ -24,7 +24,7 @@ they already have.
 Add the marketplace in Claude Code:
 
 ```bash
-/plugin marketplace add openai/codex-plugin-cc
+/plugin marketplace add audichuang/codex-plugin-cc
 ```
 
 Install the plugin:
