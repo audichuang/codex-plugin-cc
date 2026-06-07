@@ -78,6 +78,10 @@ test("captureTurn does not crash on a malformed error notification missing the e
   });
   const state = await promise;
   assert.equal(state.finalTurn.status, "completed");
+  // And it must NOT fabricate a synthetic "unknown error": the turn completed
+  // normally, so a malformed non-terminal error notification leaves state.error
+  // unset (otherwise the no-output failure path would surface a phantom error).
+  assert.equal(state.error ?? null, null, "a malformed non-terminal error must not fabricate state.error");
 });
 
 test("a terminal error on a SUBAGENT thread does not fail the root turn", async () => {

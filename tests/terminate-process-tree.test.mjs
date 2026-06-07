@@ -80,6 +80,35 @@ test("terminateProcessTree reads the process table with a generous maxBuffer (no
   assert.ok(psOptions.maxBuffer >= 8 * 1024 * 1024, "maxBuffer must be large enough for a big process table");
 });
 
+test("terminateProcessTree parses a LARGE ps table through readProcessTable and reaps every descendant", () => {
+  // Behavioral guard (complements the maxBuffer-constant test above): drive the
+  // REAL readProcessTable parse path via runCommandImpl with a multi-thousand-row
+  // `pid ppid` table and assert the sweep enumerates+signals all of them. A parse
+  // or BFS regression (or a silent row cap) would drop descendants here.
+  const N = 3000;
+  const lines = ["1 0", "500 1"];
+  for (let i = 0; i < N; i += 1) {
+    lines.push(`${1000 + i} 500`); // N direct children of 500
+  }
+  const stdout = lines.join("\n") + "\n";
+  const { kill, calls } = recordingKill();
+  terminateProcessTree(500, {
+    platform: "linux",
+    killImpl: kill,
+    runCommandImpl: (command) =>
+      command === "ps"
+        ? { status: 0, stdout, stderr: "", error: null }
+        : { status: 0, stdout: "", stderr: "", error: null }
+  });
+  const signalled = new Set(calls.map((c) => c.pid));
+  let missing = 0;
+  for (let i = 0; i < N; i += 1) {
+    if (!signalled.has(1000 + i)) missing += 1;
+  }
+  assert.equal(missing, 0, `all ${N} descendants must be signalled; ${missing} were dropped`);
+  assert.ok(signalled.has(-500) || signalled.has(500), "the root/group must still be signalled");
+});
+
 test("terminateProcessTree reaps descendants then falls back to a single kill when the child is not a group leader", () => {
   const calls = [];
   const outcome = terminateProcessTree(500, {

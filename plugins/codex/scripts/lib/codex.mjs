@@ -582,7 +582,14 @@ function applyTurnNotification(state, message) {
       const errParams = message.params ?? {};
       const errObject = errParams.error ?? null;
       const errMessage = errObject?.message ?? "unknown error";
-      state.error = errObject ?? new Error(errMessage);
+      // Only record a REAL error object. Don't fabricate a synthetic "unknown error"
+      // for a malformed NON-terminal notification: the turn may still complete
+      // normally, and a fabricated state.error would otherwise surface as the
+      // failure message on an otherwise-successful no-output turn. The terminal
+      // branch below installs a fallback Error only when it actually fails the turn.
+      if (errObject) {
+        state.error = errObject;
+      }
       emitProgress(state.onProgress, `Codex error: ${errMessage}`, "failed");
       // A non-retryable error (e.g. permanent auth failure) may never be followed
       // by turn/completed, leaving the turn hung. Complete it as failed so the
@@ -590,6 +597,12 @@ function applyTurnNotification(state, message) {
       // Only the ROOT thread's error completes the turn — mirror the turn/completed
       // handling, where a subagent thread's terminal event must not fail the parent.
       if (isTerminalTurnError(errParams) && (errParams.threadId ?? null) === state.threadId) {
+        // We are failing the turn: ensure a failure reason exists even when the
+        // notification carried no error object (the no-output failure path reads
+        // state.error?.message).
+        if (!state.error) {
+          state.error = new Error(errMessage);
+        }
         const failedTurnId =
           state.threadTurnIds.get(state.threadId) ?? state.turnId ?? errParams.turnId ?? "error-turn";
         completeTurn(state, { id: failedTurnId, status: "failed" });

@@ -49,7 +49,7 @@ so `resolveWorkspaceRoot` returns it verbatim and the whole job tree stays sandb
 | Interrupt + terminate a tracked job | `runTrackedJob(job, runner, { interruptOnTimeout, terminateOnTimeout, timeoutMs })` | `lib/tracked-jobs.mjs` |
 | SessionEnd broker shutdown/teardown | `handleSessionEnd(input, { sendBrokerShutdown, teardownBrokerSession, hasActiveBackgroundJobs, cleanupSessionJobs })` | `session-lifecycle-hook.mjs` |
 | Reap/escalate a broker | `reapStaleBroker(session, { killProcess, isProcessAlive, forceKill, sleep, escalateAfterMs })` | `lib/broker-lifecycle.mjs` |
-| Spawn worker/watchdog | `enqueueBackgroundTask(ws, job, opts, { spawnWorker, spawnWatchdog })` | `codex-companion.mjs` |
+| Spawn worker/watchdog | `enqueueBackgroundTask(cwd, job, request, { spawnWorker, spawnWatchdog })` | `codex-companion.mjs` |
 
 **Fake pids:** alive = `process.pid`; never-allocated/dead = `2_147_483_646`.
 `hasActiveBackgroundJobs` treats a background job with a live worker pid as active and
@@ -73,7 +73,7 @@ reconciles a dead-pid one to inactive — use these two pids to drive both branc
 | `terminateProcessTree(realPid)` with default `killImpl` | The recorded pid is the test runner's own `process.pid` — the test SIGTERMs itself | inject `killImpl`/`terminateOnTimeout` recorder |
 | Real `setTimeout(timeoutMs)` raced against a real runner | Flaky pass/fail on a loaded machine | never-settling runner + injected timers |
 | Reading `process.env.CODEX_*` set by the dev | Non-deterministic timeouts/session filtering | helpers drops them; pass values explicitly |
-| Asserting before unref'd work fired | Misses the scheduled terminate/signal | await a `setImmediate` macrotask |
+| Asserting before unref'd work fired | Misses the scheduled terminate/signal | `await new Promise(r => setTimeout(r, 20))` — NOT `setImmediate` (see Determinism) |
 
 ## Example
 

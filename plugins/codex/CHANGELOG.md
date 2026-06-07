@@ -1,5 +1,37 @@
 # Changelog
 
+## 1.0.15
+
+Post-1.0.14 review polish (all findings were MINOR/NIT — the two 1.0.14 BLOCKER
+fixes were independently verified correct, one via a revert-to-red mutation
+check). TDD throughout.
+
+- **`captureTurn` no longer fabricates a synthetic `state.error` for a
+  malformed, non-terminal `error` notification** (`lib/codex.mjs`). A protocol
+  error notification missing its `error` object on a turn that then completes
+  normally previously left a phantom "unknown error" that could surface on the
+  no-output failure path. We now record `state.error` only for a real error
+  object; the terminal-failure branch still installs a fallback reason when it
+  actually fails the turn. Locked by an extended `permanent-auth-shortcircuit`
+  test asserting `state.error` stays unset.
+- **Test robustness:** `strings` "no O(n^2)" test now asserts a coarse
+  wall-clock ceiling so a correct-but-quadratic `stripAnsi` refactor is caught
+  (the prior output-equality assertion alone would not catch a perf regression);
+  a new behavioral `terminate-process-tree` test drives the real
+  `readProcessTable` parse path with a multi-thousand-row table and asserts
+  every descendant is reaped; `sandbox-mode` test now imports `./helpers.mjs`
+  for ambient-env isolation per convention.
+- **`testing-with-seams` skill:** fixed a self-contradiction (the Common
+  Mistakes row recommended `setImmediate`, which the Determinism section
+  forbids) and corrected the `enqueueBackgroundTask` seam signature to
+  `cwd, job, request, deps`.
+- **Docs:** refreshed a stale `resolveSandboxMode` line reference in
+  `reliability-backlog.md`.
+
+Suite: 300 tests, deterministic green (verified stable under 4x concurrent runs;
+the apparent flake during multi-agent review was CPU contention from ~9 parallel
+full-suite runners, not a suite defect).
+
 ## 1.0.14
 
 Follow-up review fixes (verified against the current code; TDD, +9 tests):

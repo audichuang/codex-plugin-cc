@@ -57,5 +57,16 @@ test("stripAnsi consumes many unterminated OSC sequences with bodies (no O(n^2),
   // quadratic. The bounded negated-class match removes opener+body in one step
   // (O(n)) and leaves nothing behind.
   const adversarial = `${ESC}]0;filler-body`.repeat(40_000);
+  const startNs = process.hrtime.bigint();
   assert.equal(stripAnsi(adversarial), "");
+  const elapsedMs = Number(process.hrtime.bigint() - startNs) / 1e6;
+  // Coarse linearity lock: the bounded negated-class match is ~1-3ms; the old
+  // unbounded lazy OSC scan was ~4800ms on this input. A correct-but-quadratic
+  // refactor would pass the equality assertion above but blow this ceiling. The
+  // bound is deliberately generous (well above linear, far below quadratic) so it
+  // does not flake under parallel-runner CPU contention.
+  assert.ok(
+    elapsedMs < 1000,
+    `stripAnsi on ${adversarial.length} chars took ${elapsedMs.toFixed(1)}ms — expected linear (<1000ms), got a superlinear stall`
+  );
 });

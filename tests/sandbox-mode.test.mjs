@@ -1,3 +1,4 @@
+import "./helpers.mjs"; // hermetic isolation: drops ambient CODEX_* (incl. CODEX_SANDBOX_MODE)
 import test from "node:test";
 import assert from "node:assert/strict";
 
