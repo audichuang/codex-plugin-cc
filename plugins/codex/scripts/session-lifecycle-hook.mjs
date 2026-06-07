@@ -19,6 +19,8 @@ import {
   applyJobPatchIfActive,
   hasActiveBackgroundJobs,
   loadState,
+  readJobFile,
+  resolveJobFile,
   resolveStateFile,
   saveState,
   writeCompletionSignalFile
@@ -40,10 +42,14 @@ function appendEnvVar(name, value) {
   fs.appendFileSync(process.env.CLAUDE_ENV_FILE, `export ${name}=${shellEscape(value)}\n`, "utf8");
 }
 
-function cleanupSessionJobs(cwd, sessionId) {
+function cleanupSessionJobs(cwd, sessionId, deps = {}) {
   if (!cwd || !sessionId) {
     return;
   }
+
+  // Injectable seam (defaults to the real import) so the CAS-before-terminate
+  // ordering is testable without signalling a real process.
+  const terminate = deps.terminateProcessTree ?? terminateProcessTree;
 
   const workspaceRoot = resolveWorkspaceRoot(cwd);
   const stateFile = resolveStateFile(workspaceRoot);
@@ -72,14 +78,32 @@ function cleanupSessionJobs(cwd, sessionId) {
       // later /codex:status can still find them.
       continue;
     }
+    // Source-of-truth guard against killing a reused pid: consult the per-job
+    // file (authoritative) before signalling. If it already shows a TERMINAL
+    // status, the worker has finished and the index row is stale — its recorded
+    // pid may have been reassigned to an unrelated process, so do NOT signal it.
+    // Otherwise terminate, preferring the per-job pid over the possibly-stale
+    // index pid (falling back to the index pid for legacy rows without one).
+    const TERMINAL = new Set(["completed", "failed", "cancelled"]);
+    let liveRecord = null;
     try {
-      terminateProcessTree(job.pid ?? Number.NaN);
+      liveRecord = readJobFile(resolveJobFile(workspaceRoot, job.id));
     } catch {
-      // Ignore teardown failures during session shutdown.
+      liveRecord = null;
     }
-    // Mark the killed job failed and emit a .done signal so a result query
-    // returns a clear reason — and any monitor waiting on the signal stops —
-    // instead of the job silently vanishing from state.
+    if (!(liveRecord && TERMINAL.has(liveRecord.status))) {
+      const pid = Number(liveRecord?.pid ?? job.pid);
+      if (Number.isInteger(pid) && pid > 0) {
+        try {
+          terminate(pid);
+        } catch {
+          // Ignore teardown failures during session shutdown.
+        }
+      }
+    }
+    // Mark the job failed and emit a .done signal so a result query returns a
+    // clear reason — and any monitor waiting on the signal stops — instead of the
+    // job silently vanishing from state.
     const reason = "Session ended before the Codex job completed; marked failed.";
     const result = applyJobPatchIfActive(workspaceRoot, job.id, () => ({
       status: "failed",

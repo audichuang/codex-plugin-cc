@@ -51,6 +51,17 @@ test("buildAdversarialReviewPrompt leaves a small review input intact", () => {
   assert.ok(!/truncat/i.test(prompt), "small inputs must not be truncated");
 });
 
+test("buildAdversarialReviewPrompt caps even when the oversize is in the framing (huge focusText), not REVIEW_INPUT", () => {
+  // Codex deep-review MAJOR: the cap only truncated REVIEW_INPUT. A huge USER_FOCUS
+  // (focusText) lives in the template framing, so it inflated the rendered prompt
+  // past the API hard limit even after REVIEW_INPUT was emptied. A final backstop
+  // must guarantee the WHOLE rendered prompt fits the budget.
+  const hugeFocus = "x".repeat(1_200_000); // ~1.2 MB of focus text alone
+  const prompt = buildAdversarialReviewPrompt(baseContext("a tiny diff"), hugeFocus);
+  const bytes = Buffer.byteLength(prompt, "utf8");
+  assert.ok(bytes <= MAX_REVIEW_PROMPT_BYTES, `framing-driven oversize must still fit; got ${bytes} > ${MAX_REVIEW_PROMPT_BYTES}`);
+});
+
 test("buildAdversarialReviewPrompt caps an oversized prompt to a valid-UTF-8 budget with a notice", () => {
   // ~2 MB of multi-byte content — well over the ~1 MB Codex input hard limit.
   const huge = "中".repeat(700_000); // 3 bytes each ≈ 2.1 MB

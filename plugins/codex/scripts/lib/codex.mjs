@@ -664,6 +664,12 @@ export async function captureTurn(client, threadId, startRequest, options = {}) 
   const state = createTurnCaptureState(threadId, options);
   const previousHandler = client.notificationHandler;
 
+  // Attach a handler immediately so an idle/transport rejection that fires BEFORE
+  // the final `await state.completion` (e.g. while still awaiting the turn/start
+  // ACK) is never surfaced as an unhandled rejection. The real await below still
+  // re-observes the rejection and throws it.
+  state.completion.catch(() => {});
+
   // Idle watchdog (#1): Codex exposes no app-server-level per-turn idle abort,
   // and a turn wedged with the socket still open never resolves state.completion
   // (the transport watchdog only fires on disconnect). An idle timer — reset on
@@ -720,13 +726,16 @@ export async function captureTurn(client, threadId, startRequest, options = {}) 
   });
 
   try {
-    armIdleTimer(); // begin watching as soon as the turn is in flight
     const response = await startRequest();
     options.onResponse?.(response, state);
     state.turnId = response.turn?.id ?? null;
     if (state.turnId) {
       state.threadTurnIds.set(state.threadId, state.turnId);
     }
+    // Arm the idle watchdog only once the turn is actually in flight (after the
+    // ACK). The ACK round-trip is separately bounded by the per-RPC wall-clock
+    // timeout, so the idle timer should track post-start silence, not the ACK.
+    armIdleTimer();
     for (const message of state.bufferedNotifications) {
       if (belongsToTurn(state, message)) {
         applyTurnNotification(state, message);

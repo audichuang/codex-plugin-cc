@@ -1,5 +1,42 @@
 # Changelog
 
+## 1.0.16
+
+Fixes from a Codex deep-review pass (it reproduced each with read-only probes).
+TDD; suite 305 green, stable across repeated runs.
+
+- **BLOCKER — `sendBrokerShutdown` settled on a partial socket chunk**
+  (`lib/broker-lifecycle.mjs`). The data handler called `done()` after ANY chunk,
+  so a busy `-32001` reply fragmented across two reads was misread as
+  `busy:false`, letting SessionEnd tear down a still-busy shared broker. Now it
+  settles only after a COMPLETE newline-terminated JSON line is parsed (bounded
+  by the existing timeout/close). Regression test feeds a split busy reply.
+- **BLOCKER — `pruneJobs` could evict an ACTIVE job** (`lib/state.mjs`). The
+  index was capped at the newest `MAX_JOBS` by `updatedAt`, so a queued/running
+  job with a stale `updatedAt` could be dropped — and `saveState` then deletes
+  the evicted job's per-job JSON/log/.done/.lock, destroying the watchdog's view
+  of a live/hung background job. Active jobs are now never pruned (kept even
+  beyond `MAX_JOBS`); only terminal jobs fill the remaining budget.
+- **MAJOR — `cleanupSessionJobs` could SIGTERM a reused pid**
+  (`session-lifecycle-hook.mjs`). It terminated the (possibly stale) index pid
+  before checking job state. Now it consults the per-job file (source of truth):
+  it never signals a job already terminal there, and prefers the per-job pid over
+  the index pid. Added a `terminateProcessTree` seam + tests for both branches.
+- **MAJOR — adversarial-review prompt cap ignored framing size**
+  (`codex-companion.mjs`). The cap only truncated `REVIEW_INPUT`; an oversized
+  `focusText`/`USER_FOCUS` could still push the rendered prompt past the API
+  limit. Added a final whole-prompt byte backstop. Test drives a ~1.2 MB focus.
+- **MINOR — idle watchdog armed before the turn/start ACK** (`lib/codex.mjs`).
+  The idle timer now arms only after the ACK (the ACK is separately bounded by
+  the per-RPC timeout), and `state.completion` gets an early handler so a
+  pre-await idle/transport rejection can never surface as an unhandled rejection.
+
+Deliberately NOT changed: `reapStaleBroker` keeps its asymmetric design
+(unconditional graceful SIGTERM, identity-verified SIGKILL escalation) — gating
+the SIGTERM on the `/proc`-based identity check would break broker reaping on
+hosts without `/proc` (macOS/Windows), a worse regression than the very narrow
+pid-reuse window it would close.
+
 ## 1.0.15
 
 Post-1.0.14 review polish (all findings were MINOR/NIT — the two 1.0.14 BLOCKER

@@ -96,6 +96,37 @@ test("sendBrokerShutdown reports busy when the broker refuses (shutdown must not
   assert.equal(result.busy, true);
 });
 
+test("sendBrokerShutdown parses a busy response split across socket chunks (must not done() on a partial line)", async () => {
+  // Codex deep-review BLOCKER: the data handler called done() after ANY chunk,
+  // even before a complete newline-terminated JSON line arrived. A busy -32001
+  // reply fragmented across two TCP/socket chunks was then read as busy:false,
+  // letting SessionEnd tear down a still-busy shared broker.
+  const dir = makeTempDir();
+  const sockPath = path.join(dir, "broker.sock");
+  const payload =
+    JSON.stringify({ id: 1, error: { code: -32001, message: "Shared Codex broker is busy serving another client; shutdown refused." } }) + "\n";
+  const splitAt = Math.floor(payload.length / 2); // mid-JSON, well before the trailing newline
+  const conns = [];
+  const server = net.createServer((socket) => {
+    conns.push(socket);
+    socket.on("data", () => {
+      socket.write(payload.slice(0, splitAt));
+      setTimeout(() => socket.write(payload.slice(splitAt)), 30);
+    });
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(sockPath, resolve);
+  });
+  try {
+    const result = await sendBrokerShutdown(`unix:${sockPath}`, 1000);
+    assert.equal(result.busy, true, "a fragmented busy response must still be parsed as busy");
+  } finally {
+    for (const socket of conns) socket.destroy();
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 test("sendBrokerShutdown reports not-busy when the broker acknowledges shutdown", async () => {
   const result = await withFakeBroker(
     () => ({ id: 1, result: {} }),

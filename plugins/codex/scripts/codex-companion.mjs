@@ -298,7 +298,15 @@ export function buildAdversarialReviewPrompt(context, focusText) {
   const overheadBytes = Buffer.byteLength(render(""), "utf8") + Buffer.byteLength(REVIEW_TRUNCATION_NOTICE, "utf8");
   const contentBudget = Math.max(0, MAX_REVIEW_PROMPT_BYTES - overheadBytes);
   const truncated = `${truncateToByteBudget(context.content, contentBudget)}${REVIEW_TRUNCATION_NOTICE}`;
-  return render(truncated);
+  const rendered = render(truncated);
+  if (Buffer.byteLength(rendered, "utf8") <= MAX_REVIEW_PROMPT_BYTES) {
+    return rendered;
+  }
+  // Final hard backstop: the framing itself (e.g. an oversized USER_FOCUS) can
+  // exceed the cap even after REVIEW_INPUT is emptied. Truncate the entire
+  // rendered prompt so we never blow the Codex API input limit. This is a no-op
+  // on the normal path; here it trims the tail to guarantee a sendable request.
+  return truncateToByteBudget(rendered, MAX_REVIEW_PROMPT_BYTES);
 }
 
 function ensureCodexAvailable(cwd) {

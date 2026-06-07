@@ -83,16 +83,24 @@ export async function sendBrokerShutdown(endpoint, timeoutMs = 1500) {
         if (!line.trim()) {
           continue;
         }
+        let message;
         try {
-          const message = JSON.parse(line);
-          if (message?.error?.code === BROKER_BUSY_RPC_CODE) {
-            busy = true;
-          }
+          message = JSON.parse(line);
         } catch {
-          // Ignore unparsable lines.
+          // A complete-but-unparsable line: ignore it and keep waiting for a
+          // valid reply (timeout/close still bound the wait).
+          continue;
         }
+        if (message?.error?.code === BROKER_BUSY_RPC_CODE) {
+          busy = true;
+        }
+        // Only settle once a COMPLETE reply line has been parsed. Settling on a
+        // partial chunk (the old `done()` after the loop) misread a fragmented
+        // busy response as not-busy and let SessionEnd tear down a busy broker.
+        done();
+        return;
       }
-      done();
+      // No complete line yet — wait for the rest of the response.
     });
     socket.on("error", done);
     socket.on("close", done);

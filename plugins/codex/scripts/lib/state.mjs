@@ -105,9 +105,20 @@ export function loadState(cwd) {
 }
 
 function pruneJobs(jobs) {
-  return [...jobs]
-    .sort((left, right) => String(right.updatedAt ?? "").localeCompare(String(left.updatedAt ?? "")))
-    .slice(0, MAX_JOBS);
+  const sorted = [...jobs].sort((left, right) =>
+    String(right.updatedAt ?? "").localeCompare(String(left.updatedAt ?? ""))
+  );
+  // NEVER prune an active (queued/running) job: saveState deletes the per-job
+  // files of any job dropped from the index, and the watchdog reads those files
+  // to keep a hung/live background job alive. Evicting an active job by a stale
+  // updatedAt would destroy the last liveness backstop. Keep all active jobs
+  // (even beyond MAX_JOBS) and fill the remaining budget with the newest
+  // terminal jobs.
+  const isActive = (job) => job.status === "queued" || job.status === "running";
+  const active = sorted.filter(isActive);
+  const terminal = sorted.filter((job) => !isActive(job));
+  const terminalBudget = Math.max(0, MAX_JOBS - active.length);
+  return [...active, ...terminal.slice(0, terminalBudget)];
 }
 
 function removeFileIfExists(filePath) {
