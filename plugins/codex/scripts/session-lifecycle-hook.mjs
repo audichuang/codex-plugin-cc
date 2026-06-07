@@ -84,6 +84,15 @@ function cleanupSessionJobs(cwd, sessionId, deps = {}) {
     // pid may have been reassigned to an unrelated process, so do NOT signal it.
     // Otherwise terminate, preferring the per-job pid over the possibly-stale
     // index pid (falling back to the index pid for legacy rows without one).
+    //
+    // RESIDUAL (not fully closed): this guard relies on the per-job file being
+    // terminal. If a worker crashed/was SIGKILLed before it could write a
+    // terminal status, the per-job file stays "running" with a now-dead pid; if
+    // that pid was recycled to an unrelated live process, we would still signal
+    // it. isProcessAlive cannot catch this (the recycled pid is alive). Only a
+    // stable cmdline-identity check (as the broker has) would close it, and the
+    // worker carries no such marker. The window is very narrow and this guard
+    // already closes the common cleanly-finished case.
     const TERMINAL = new Set(["completed", "failed", "cancelled"]);
     let liveRecord = null;
     try {

@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.0.17
+
+Docs/test-clarity polish from the 1.0.16 review. **No behavior change.**
+
+- `session-lifecycle-hook.mjs`: documented the one residual window in the
+  cleanupSessionJobs pid guard — if a worker is SIGKILLed before writing a
+  terminal status, its per-job file stays "running" with a dead pid, so a
+  recycled pid could still be signalled (only the common cleanly-finished case is
+  closed; `isProcessAlive` can't catch a recycled-but-live pid).
+- Renamed the cleanup test from "CASes before terminating" to "checks the per-job
+  source-of-truth before terminating" — the safety comes from the terminal-status
+  guard, not CAS ordering (terminate runs before the CAS, which only records the
+  failure); the assertions were already correct.
+
 ## 1.0.16
 
 Fixes from a Codex deep-review pass (it reproduced each with read-only probes).

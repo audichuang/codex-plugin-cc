@@ -7,12 +7,15 @@ import { writeJobFile, saveState, resolveJobDoneFile } from "../plugins/codex/sc
 import { cleanupSessionJobs } from "../plugins/codex/scripts/session-lifecycle-hook.mjs";
 
 // Regression (Codex deep-review MAJOR): cleanupSessionJobs terminated job.pid
-// (from the possibly-stale INDEX) BEFORE the CAS terminal transition. On a stale
-// index row whose job had already finished and whose pid was reused, that
-// SIGTERM'd an unrelated process. The fix: CAS first, terminate only when we win
-// the transition, and signal the pid from the freshly-read per-job record.
+// (from the possibly-stale INDEX) without first consulting the per-job file. On
+// a stale index row whose job had already finished and whose pid was reused,
+// that SIGTERM'd an unrelated process. The fix consults the per-job file (the
+// source of truth) BEFORE signalling: it never signals a job already terminal
+// there, and prefers the per-job pid over the index pid. (Safety comes from the
+// terminal-status guard, not from CAS ordering — terminate still runs before the
+// CAS, which only records the failure.)
 
-test("cleanupSessionJobs CASes before terminating and signals the authoritative per-job pid (not the stale index pid)", () => {
+test("cleanupSessionJobs checks the per-job source-of-truth before terminating and signals the authoritative pid (not the stale index pid)", () => {
   const cwd = makeTempDir();
   // Per-job file (source of truth): still running, real worker pid 55555.
   writeJobFile(cwd, "j1", { id: "j1", status: "running", pid: 55555, sessionId: "s1", logFile: null });
