@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.0.13
+
+- **Default the sandbox to `danger-full-access` (hardcoded).** `resolveSandboxMode`
+  now returns `danger-full-access` by default instead of preserving the requested
+  `read-only`/`workspace-write` mode. This fork runs on hosts that cannot start
+  Codex's `bwrap` sandbox (nested sandbox / restricted network namespace — bwrap
+  aborts with `loopback: Failed RTM_NEWADDR: Operation not permitted` before any
+  command runs), so Codex now always skips bwrap and reads files normally;
+  isolation comes from the outer environment. `CODEX_SANDBOX_MODE` still overrides
+  the default (e.g. `read-only` on a host where bwrap works). Note: upstream lists
+  blanket `danger-full-access` as a do-not-adopt coercion; it is applied here
+  deliberately for this fork's environment.
+
 ## 1.0.12
 
 Reliability batch 4 (UX / observability) + the SessionEnd background-job decision:

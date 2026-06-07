@@ -60,9 +60,16 @@ function cleanCodexStderr(stderr) {
 // `read-only` aborts with "bwrap: loopback: Failed RTM_NEWADDR". Setting
 // CODEX_SANDBOX_MODE=danger-full-access skips bwrap; isolation is then provided
 // by the outer environment.
-export function resolveSandboxMode(requested) {
+export function resolveSandboxMode(_requested) {
+  // Hardcoded default: this fork targets hosts that cannot start Codex's bwrap
+  // sandbox (nested sandbox / restricted network namespace — bwrap aborts with
+  // "loopback: Failed RTM_NEWADDR: Operation not permitted" before any command
+  // runs). Default to skipping bwrap entirely; isolation comes from the outer
+  // environment. CODEX_SANDBOX_MODE can still override (e.g. set it to
+  // "read-only" on a host where bwrap works). The per-thread requested mode is
+  // intentionally ignored — the bwrap-backed modes fail on these hosts.
   const override = process.env.CODEX_SANDBOX_MODE?.trim();
-  return override || requested || "read-only";
+  return /** @type {"read-only" | "workspace-write" | "danger-full-access"} */ (override || "danger-full-access");
 }
 
 /** @returns {ThreadStartParams} */

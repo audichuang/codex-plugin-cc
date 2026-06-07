@@ -21,24 +21,28 @@ function withEnv(value, fn) {
   }
 }
 
-test("resolveSandboxMode keeps the requested mode when CODEX_SANDBOX_MODE is unset", () => {
+test("resolveSandboxMode is hardcoded to danger-full-access by default (bwrap can't start on this fork's hosts)", () => {
   withEnv(undefined, () => {
-    assert.equal(resolveSandboxMode("read-only"), "read-only");
-    assert.equal(resolveSandboxMode("workspace-write"), "workspace-write");
-    assert.equal(resolveSandboxMode(undefined), "read-only");
-  });
-});
-
-test("resolveSandboxMode lets CODEX_SANDBOX_MODE force the mode (for hosts that can't run Codex's bwrap sandbox)", () => {
-  withEnv("danger-full-access", () => {
+    // The per-thread requested mode is intentionally ignored — bwrap modes
+    // (read-only/workspace-write) fail on these hosts, so we always skip bwrap.
     assert.equal(resolveSandboxMode("read-only"), "danger-full-access");
     assert.equal(resolveSandboxMode("workspace-write"), "danger-full-access");
     assert.equal(resolveSandboxMode(undefined), "danger-full-access");
   });
 });
 
-test("resolveSandboxMode ignores a blank CODEX_SANDBOX_MODE", () => {
+test("resolveSandboxMode still lets CODEX_SANDBOX_MODE override the hardcoded default", () => {
+  withEnv("read-only", () => {
+    assert.equal(resolveSandboxMode("workspace-write"), "read-only");
+    assert.equal(resolveSandboxMode(undefined), "read-only");
+  });
+  withEnv("danger-full-access", () => {
+    assert.equal(resolveSandboxMode("read-only"), "danger-full-access");
+  });
+});
+
+test("resolveSandboxMode ignores a blank CODEX_SANDBOX_MODE and falls back to the hardcoded default", () => {
   withEnv("   ", () => {
-    assert.equal(resolveSandboxMode("read-only"), "read-only");
+    assert.equal(resolveSandboxMode("read-only"), "danger-full-access");
   });
 });
