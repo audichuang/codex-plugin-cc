@@ -87,21 +87,18 @@
 
 ---
 
-#### #3 app-server 子進程組沒被收乾淨（孤兒 MCP 子進程）　【GAP】　參考：PR #358
+#### #3 app-server 子進程組沒被收乾淨（孤兒 MCP 子進程）　【DONE / IMPLEMENTED】　參考：PR #358（採用不同做法）
 
-**問題**：spawn `codex app-server` 時**沒有 detached**,close() 在 POSIX 用裸 `SIGTERM`(非 `terminateProcessTree`)。app-server 會 spawn 自己的 MCP / 工具子進程;只 SIGTERM 父進程會留下孤兒子樹。
+**問題**：spawn `codex app-server` 時若只 SIGTERM 父進程，會留下它自己 spawn 的 MCP / 工具子進程孤兒子樹。
 
-**我們的現況**：
-- `plugins/codex/scripts/lib/app-server.mjs:234` spawn 時只設 stdio/shell/windowsHide,**無 `detached`**。
-- close()（`app-server.mjs:285-303`）把 `terminateProcessTree` 鎖在 `process.platform === 'win32'` 之後,POSIX 走裸 `this.proc.kill('SIGTERM')`（`:300`）。
+**我們的現況（已實作，commit 9929262）**：
+- close() → `terminateChild()`（`plugins/codex/scripts/lib/app-server.mjs:311-326`）**在每個平台**都走 `terminateProcessTree`（Windows: `taskkill /T`；POSIX: 群組 `kill(-pid)` + 經 `ps` 列舉的後代子進程掃除）。已無 win32 gating、也無裸 `this.proc.kill('SIGTERM')`。
+- codex app-server child 刻意**不 detached**（`app-server.mjs:251`）——它因此留在 detached broker 的進程組內（broker 才是 group leader，`broker-lifecycle.mjs:107`），所以 broker 被 reap 時（watchdog / `reapStaleBroker` / `defaultForceKill` 的群組 kill）codex child 會一起被收掉，而它自己的非 group-leader MCP/工具子進程則由 `collectDescendantPids` 的 ps-tree 掃除涵蓋（`process.mjs:99-138 / 202-232`）。
+- 兩條 reap 路徑都覆蓋：graceful close()→terminateChild()，以及 broker-reaping 路徑。
 
-**修法**（照 #358）：
-1. `CodexAppServerClientOptions` 加 `detachProcessGroup`。
-2. spawn（`app-server.mjs:234`）設 `detached: process.platform !== 'win32' && this.options.detachProcessGroup === true`,讓它領自己的進程組。
-3. broker（`app-server-broker.mjs`）傳 `detachProcessGroup: true`（它已裝 SIGINT/SIGTERM handler）。
-4. close() 一律走 `terminateProcessTree`(用 `kill(-pid)` 群組訊號收整棵樹),不再只在 win32 才用。
+**為何不照 #358 的 `detachProcessGroup`**：#358 是把 codex child detach 成獨立進程組。本 fork 不需要——broker 已是 group leader，加上後代掃除已涵蓋整棵子樹；保持 codex child 非 detached 反而避免 watchdog reap broker 時把它的子樹孤兒化。
 
-**測試**：用 spawn 接縫驗證 detached flag 在 POSIX 為 true;close() 在 POSIX 也呼叫 `terminateProcessTree`。注意保留 §0.5 的 broker 共享安全。
+**測試**：`tests/app-server-close-reap.test.mjs` 斷言 `terminateChild` 一律走 `terminateProcessTree`、絕不裸 `proc.kill`。
 
 ---
 
@@ -228,7 +225,7 @@
 | #261, #243, #184, #302(part1), #267, #225, #176 | hang/zombie 核心 | ✅ ALREADY_HAVE（已領先上游） |
 | #302(part2), #312 | captureTurn idle heartbeat | ⚠️ PARTIAL → 缺口 #1 |
 | #311, #171 | stdout 解析健壯 | ❌ GAP → 缺口 #2 |
-| #358 | 進程組 reaping | ❌ GAP → 缺口 #3 |
+| #358 | 進程組 reaping | ✅ DONE → 缺口 #3（不同做法：靠 broker 群組 + 後代掃除） |
 | #313, #314, #327 | prompt size cap | ❌ GAP → 缺口 #4 |
 | #189, #165 | hook EAGAIN | ❌ GAP → 缺口 #5 |
 | dragon fork | 跨 workspace 查找 | ❌ GAP → 缺口 #6 |

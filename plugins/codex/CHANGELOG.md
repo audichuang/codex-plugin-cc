@@ -1,5 +1,46 @@
 # Changelog
 
+## 1.0.14
+
+Follow-up review fixes (verified against the current code; TDD, +9 tests):
+
+- **SessionEnd no longer reaps the shared broker out from under an active
+  background job (the real gap behind #355).** `handleSessionEnd` sent the
+  graceful `broker/shutdown` RPC *unconditionally* before the background-job
+  check — and the broker's busy-gate only refuses while another socket owns an
+  in-flight request/stream, so a background job that is queued / connecting /
+  between its `thread/start` and `turn/start` was not seen as busy and the broker
+  would exit, orphaning that job's app-server. The RPC is now gated on
+  `hasActiveBackgroundJobs` too (symmetric with the already-gated local teardown).
+  `handleSessionEnd` is exported with an injectable deps seam and has an
+  integration test.
+- **The turn idle watchdog now actually interrupts the wedged turn.** An
+  `ETURNIDLE` rejection (from `captureTurn`'s idle timer) previously took the
+  plain-failure path: the job was marked failed but the orphan turn kept running
+  on the shared broker (closing the socket does not stop it). `runTrackedJob` now
+  treats `ETURNIDLE` like the hard-cap timeout — best-effort `turn/interrupt` +
+  process-tree terminate — and tags the record `idleTimedOut`. (Still disabled by
+  default; only arms when `CODEX_TURN_IDLE_TIMEOUT_MS` is set.)
+- **A malformed `error` notification no longer crashes the host process.** The
+  `case "error"` handler dereferenced `params.error.message` with no guard; a
+  notification missing the `error` field threw a `TypeError` inside the stream
+  listener (no try/catch), crashing the process. All dereferences are now guarded.
+- **`stripAnsi` is linear again.** The OSC branch used an unbounded lazy
+  `[\s\S]*?` that re-walked to end-of-string on every unterminated `ESC]` opener
+  (O(n²) — a long opener-dense line stalled the broker line parser for seconds).
+  Replaced with a bounded negated-class body + optional terminator.
+- **`CODEX_SANDBOX_MODE` is validated.** A typo (e.g. `readonly`) was forwarded
+  verbatim to the app-server (opaque `thread/start` failure); it now falls back to
+  the default with a warning. The stale `resolveSandboxMode` comment is corrected,
+  and the README's now-false "read-only / will not perform any changes" review
+  claims are reworded with a new **Sandbox** section documenting the override.
+- **`terminateProcessTree`'s `ps` read gets an explicit 16MB maxBuffer** so a very
+  large process table can't truncate (ENOBUFS) into an empty descendant sweep.
+- **Test hermeticity:** the harness now redirects `HOME`/`USERPROFILE` so
+  cross-workspace lookups never read the developer's real `~/.claude`.
+- **Docs:** `reliability-backlog.md` #3 (process-group reaping) marked DONE — it
+  was implemented in 1.0.9 but still labelled a gap.
+
 ## 1.0.13
 
 - **Default the sandbox to `danger-full-access` (hardcoded).** `resolveSandboxMode`

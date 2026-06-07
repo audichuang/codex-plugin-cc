@@ -52,24 +52,30 @@ function cleanCodexStderr(stderr) {
     .join("\n");
 }
 
-// Resolve the sandbox mode for a Codex thread. The plugin defaults to the
-// safe per-command choice (read-only / workspace-write), but a host can force a
-// mode via CODEX_SANDBOX_MODE. This is the escape hatch for environments where
-// Codex's own bwrap sandbox cannot start — e.g. nested sandboxes/containers that
-// forbid creating a network namespace (`unshare --net` -> EPERM), where even
-// `read-only` aborts with "bwrap: loopback: Failed RTM_NEWADDR". Setting
-// CODEX_SANDBOX_MODE=danger-full-access skips bwrap; isolation is then provided
-// by the outer environment.
-export function resolveSandboxMode(_requested) {
-  // Hardcoded default: this fork targets hosts that cannot start Codex's bwrap
-  // sandbox (nested sandbox / restricted network namespace — bwrap aborts with
-  // "loopback: Failed RTM_NEWADDR: Operation not permitted" before any command
-  // runs). Default to skipping bwrap entirely; isolation comes from the outer
-  // environment. CODEX_SANDBOX_MODE can still override (e.g. set it to
-  // "read-only" on a host where bwrap works). The per-thread requested mode is
-  // intentionally ignored — the bwrap-backed modes fail on these hosts.
+const VALID_SANDBOX_MODES = new Set(["read-only", "workspace-write", "danger-full-access"]);
+
+// Resolve the sandbox mode for a Codex thread. This fork HARDCODES the default to
+// danger-full-access (skip bwrap) because its target hosts cannot start Codex's
+// bwrap sandbox: nested sandboxes / restricted network namespaces (`unshare --net`
+// -> EPERM) abort with "bwrap: loopback: Failed RTM_NEWADDR" before any command
+// runs, and even "read-only" fails there. The per-thread requested mode (e.g.
+// review's "read-only") is therefore intentionally IGNORED; isolation comes from
+// the outer environment. CODEX_SANDBOX_MODE overrides the default on hosts where
+// bwrap works (e.g. set it to "read-only"). An override that is not a known mode
+// is rejected (warn + fall back) rather than forwarded verbatim to the app-server,
+// which would otherwise fail thread/start with an opaque deserialization error.
+export function resolveSandboxMode(_requested, options = {}) {
   const override = process.env.CODEX_SANDBOX_MODE?.trim();
-  return /** @type {"read-only" | "workspace-write" | "danger-full-access"} */ (override || "danger-full-access");
+  if (override) {
+    if (VALID_SANDBOX_MODES.has(override)) {
+      return /** @type {"read-only" | "workspace-write" | "danger-full-access"} */ (override);
+    }
+    const warn = options.warn ?? ((message) => process.stderr.write(`${message}\n`));
+    warn(
+      `[codex] Ignoring invalid CODEX_SANDBOX_MODE="${override}"; expected one of ${[...VALID_SANDBOX_MODES].join("|")}. Falling back to danger-full-access.`
+    );
+  }
+  return "danger-full-access";
 }
 
 /** @returns {ThreadStartParams} */
@@ -567,20 +573,29 @@ function applyTurnNotification(state, message) {
         emitProgress(state.onProgress, update?.message, update?.phase ?? null);
       }
       break;
-    case "error":
-      state.error = message.params.error;
-      emitProgress(state.onProgress, `Codex error: ${message.params.error.message}`, "failed");
+    case "error": {
+      // Guard every dereference: a protocol-malformed `error` notification can
+      // arrive with params present but no `error` object. The handler runs inside
+      // the stream `line`/`data` listener with no try/catch, so a raw
+      // params.error.message deref would throw a TypeError that crashes the host
+      // process rather than failing the turn.
+      const errParams = message.params ?? {};
+      const errObject = errParams.error ?? null;
+      const errMessage = errObject?.message ?? "unknown error";
+      state.error = errObject ?? new Error(errMessage);
+      emitProgress(state.onProgress, `Codex error: ${errMessage}`, "failed");
       // A non-retryable error (e.g. permanent auth failure) may never be followed
       // by turn/completed, leaving the turn hung. Complete it as failed so the
       // companion reaches a terminal state instead of waiting out the hard cap.
       // Only the ROOT thread's error completes the turn — mirror the turn/completed
       // handling, where a subagent thread's terminal event must not fail the parent.
-      if (isTerminalTurnError(message.params) && (message.params.threadId ?? null) === state.threadId) {
+      if (isTerminalTurnError(errParams) && (errParams.threadId ?? null) === state.threadId) {
         const failedTurnId =
-          state.threadTurnIds.get(state.threadId) ?? state.turnId ?? message.params.turnId ?? "error-turn";
+          state.threadTurnIds.get(state.threadId) ?? state.turnId ?? errParams.turnId ?? "error-turn";
         completeTurn(state, { id: failedTurnId, status: "failed" });
       }
       break;
+    }
     case "turn/completed":
       if ((message.params.threadId ?? null) !== state.threadId) {
         state.activeSubagentTurns.delete(message.params.threadId);

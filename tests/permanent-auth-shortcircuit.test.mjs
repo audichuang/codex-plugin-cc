@@ -55,6 +55,31 @@ test("captureTurn completes the turn as failed on a terminal (non-retryable) err
   assert.match(state.error.message, /401/);
 });
 
+test("captureTurn does not crash on a malformed error notification missing the error field", async () => {
+  const client = makeFakeClient();
+  const promise = captureTurn(
+    client,
+    "thread1",
+    async () => ({ turn: { id: "turn1", status: "inProgress" } }),
+    {}
+  );
+  await tick();
+  // A protocol-malformed `error` notification: params present but NO `error`
+  // object. The handler must not dereference params.error.message — that throws a
+  // TypeError synchronously inside the stream listener, which has no try/catch and
+  // crashes the whole host process.
+  assert.doesNotThrow(() => {
+    client.notificationHandler({ method: "error", params: { threadId: "thread1", turnId: "turn1" } });
+  });
+  // It carries no terminal signal, so the turn completes via the real event.
+  client.notificationHandler({
+    method: "turn/completed",
+    params: { threadId: "thread1", turn: { id: "turn1", status: "completed" } }
+  });
+  const state = await promise;
+  assert.equal(state.finalTurn.status, "completed");
+});
+
 test("a terminal error on a SUBAGENT thread does not fail the root turn", async () => {
   const client = makeFakeClient();
   const promise = captureTurn(

@@ -41,3 +41,21 @@ test("stripAnsi does NOT touch the literal text backslash-u-001b (JSON-encoded e
 test("stripAnsi removes erase-line / cursor-move sequences and keeps surrounding text", () => {
   assert.equal(stripAnsi(`${ESC}[2K${ESC}[1Ghello`), "hello");
 });
+
+test("stripAnsi removes an UNTERMINATED OSC sequence (no BEL/ST before end of string)", () => {
+  // A raw OSC opener with no terminator must be consumed whole, not left as a
+  // dangling `8;;...` tail (the old regex required a terminator, so it only
+  // stripped the 2-char ESC] and left the body behind).
+  assert.equal(stripAnsi(`${ESC}]8;;https://example.com/no-terminator`), "");
+  assert.equal(stripAnsi(`before${ESC}]0;title-with-no-term`), "before");
+});
+
+test("stripAnsi consumes many unterminated OSC sequences with bodies (no O(n^2), no dangling body)", () => {
+  // Each `ESC] <body>` opener with no terminator used to fall through to the
+  // 2-char Fe-escape branch (stripping only `ESC]`) and leave every body behind,
+  // while the OSC branch's unbounded lazy scan re-walked to EOS per opener =>
+  // quadratic. The bounded negated-class match removes opener+body in one step
+  // (O(n)) and leaves nothing behind.
+  const adversarial = `${ESC}]0;filler-body`.repeat(40_000);
+  assert.equal(stripAnsi(adversarial), "");
+});

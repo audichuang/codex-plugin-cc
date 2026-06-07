@@ -9,7 +9,7 @@ they already have.
 
 ## What You Get
 
-- `/codex:review` for a normal read-only Codex review
+- `/codex:review` for a normal Codex review (review-only; see [Sandbox](#sandbox))
 - `/codex:adversarial-review` for a steerable challenge review
 - `/codex:rescue`, `/codex:status`, `/codex:result`, `/codex:attach`, and `/codex:cancel` to delegate work, watch it live, and manage background jobs
 
@@ -96,7 +96,7 @@ Examples:
 /codex:review --background
 ```
 
-This command is read-only and will not perform any changes. When run in the background you can use [`/codex:status`](#codexstatus) to check on the progress and [`/codex:cancel`](#codexcancel) to cancel the ongoing task.
+This command runs a review and is not intended to modify your files. Note: on this fork the Codex sandbox defaults to `danger-full-access` (see [Sandbox](#sandbox)), so isolation comes from the outer environment rather than a read-only sandbox boundary. When run in the background you can use [`/codex:status`](#codexstatus) to check on the progress and [`/codex:cancel`](#codexcancel) to cancel the ongoing task.
 
 ### `/codex:adversarial-review`
 
@@ -121,7 +121,7 @@ Examples:
 /codex:adversarial-review --background look for race conditions and question the chosen approach
 ```
 
-This command is read-only. It does not fix code.
+This command is review-only — it does not fix code. (See [Sandbox](#sandbox) for how the Codex sandbox mode is resolved on this fork.)
 
 ### `/codex:rescue`
 
@@ -170,7 +170,7 @@ Reads a plan file and hands it to Codex to implement with write access. Pass a p
 
 Builds a complete GPT-5.5 prompt and, by default, **sends it to Codex and returns Codex's response** — the one-key "reflect → ask Codex → bring it back" loop. The prompt is composed with the internal `gpt-5-5-prompting` methodology and runs through the same task runner (defaulting to `gpt-5.5` / `xhigh`).
 
-- with no arguments, it reflects on the work done in this session (via `git diff`/`git log` and the conversation) and asks Codex to **review** that work (read-only), with the changed files listed as absolute paths.
+- with no arguments, it reflects on the work done in this session (via `git diff`/`git log` and the conversation) and asks Codex to **review** that work (review-only; see [Sandbox](#sandbox)), with the changed files listed as absolute paths.
 - with arguments, it treats them as the task and builds a GPT-5.5 prompt tailored to the task type (code review, document analysis, research, rewrite, or agentic).
 - `--print` (or `--prompt-only`) skips the run and just emits the prompt for you to paste yourself; `--background` runs it as a background job (check `/codex:status`, `/codex:result`); `--write` lets a task edit code.
 
@@ -286,6 +286,20 @@ Then check in with:
 ## Codex Integration
 
 The Codex plugin wraps the [Codex app server](https://developers.openai.com/codex/app-server). It uses the global `codex` binary installed in your environment and [applies the same configuration](https://developers.openai.com/codex/config-basic).
+
+### Sandbox
+
+This fork **hardcodes the Codex sandbox to `danger-full-access`** (`resolveSandboxMode` in `plugins/codex/scripts/lib/codex.mjs`). It targets hosts where Codex's own `bwrap` sandbox cannot start — nested sandboxes / containers that forbid creating a network namespace (`unshare --net` → `EPERM`), where even `read-only` aborts with `bwrap: loopback: Failed RTM_NEWADDR` before any command runs. Skipping `bwrap` is what lets Codex run there at all; isolation is expected to come from the outer environment.
+
+A consequence to be aware of: the per-command requested mode is **ignored** at the sandbox layer. `/codex:review` and `/codex:adversarial-review` ask for `read-only`, but they actually run with full filesystem + network access. The review prompts still only report findings rather than edit code, but there is no read-only sandbox boundary enforcing that.
+
+On a host where `bwrap` works, set `CODEX_SANDBOX_MODE` to restore a real sandbox:
+
+```bash
+export CODEX_SANDBOX_MODE=read-only        # or workspace-write, or danger-full-access
+```
+
+An unrecognised value is ignored (with a stderr warning) and falls back to `danger-full-access`.
 
 ### Common Configurations
 

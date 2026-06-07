@@ -60,6 +60,26 @@ test("terminateProcessTree still group-kills when ps enumeration fails (graceful
   assert.equal(outcome.delivered, true);
 });
 
+test("terminateProcessTree reads the process table with a generous maxBuffer (no truncation on a large table)", () => {
+  // readProcessTable runs `ps -A` with no maxBuffer => the ~1MB spawnSync default,
+  // so a very large process table overflows (ENOBUFS) and silently yields an empty
+  // descendant list. An explicit generous maxBuffer prevents that truncation.
+  let psOptions = null;
+  terminateProcessTree(500, {
+    platform: "linux",
+    killImpl: () => {},
+    runCommandImpl: (command, _args, options) => {
+      if (command === "ps") {
+        psOptions = options;
+      }
+      return { status: 0, stdout: "", stderr: "", error: null };
+    }
+  });
+  assert.ok(psOptions, "ps must be invoked to read the process table");
+  assert.equal(typeof psOptions.maxBuffer, "number", "the ps read must set an explicit maxBuffer");
+  assert.ok(psOptions.maxBuffer >= 8 * 1024 * 1024, "maxBuffer must be large enough for a big process table");
+});
+
 test("terminateProcessTree reaps descendants then falls back to a single kill when the child is not a group leader", () => {
   const calls = [];
   const outcome = terminateProcessTree(500, {

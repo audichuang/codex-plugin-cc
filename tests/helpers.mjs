@@ -16,6 +16,16 @@ import { spawnSync } from "node:child_process";
 // directly (state.test.mjs) still save/restore around their own changes.
 process.env.CLAUDE_PLUGIN_DATA = fs.mkdtempSync(path.join(os.tmpdir(), "codex-plugin-data-"));
 
+// Also redirect HOME (and USERPROFILE on Windows) to a throwaway dir. state.mjs's
+// collectCandidateStateRoots defaults its homedir to os.homedir() and walks
+// ~/.claude/plugins/data for codex* state dirs during cross-workspace lookups; if
+// HOME points at the developer's real home, those lookups read real on-disk job
+// files (a hermeticity breach and a flake source). os.homedir() honors $HOME on
+// POSIX and %USERPROFILE% on Windows, so redirecting both neutralizes the walk.
+const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), "codex-plugin-home-"));
+process.env.HOME = fakeHome;
+process.env.USERPROFILE = fakeHome;
+
 // Also drop ambient CODEX_* knobs from the test process itself (buildEnv already
 // does this for spawned companions). Otherwise an ambient CODEX_COMPANION_SESSION_ID
 // makes in-process, session-filtered status/result reads see "no jobs", and

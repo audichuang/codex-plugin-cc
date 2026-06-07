@@ -104,6 +104,50 @@ test("runTrackedJob schedules a process-tree terminate on hard timeout so the wo
   assert.equal(killed[0], process.pid, "it terminates the worker process tree (runningRecord.pid)");
 });
 
+test("runTrackedJob interrupts + terminates on an ETURNIDLE rejection (idle watchdog), like a hard timeout", async () => {
+  const workspace = makeTempDir();
+  const jobId = "job-idle";
+  const calls = [];
+  const killed = [];
+
+  await assert.rejects(
+    runTrackedJob(
+      { id: jobId, workspaceRoot: workspace },
+      async () => {
+        // Progress records the active thread/turn, then the captureTurn idle
+        // watchdog rejects with an ETURNIDLE-coded error (turn wedged, not hung
+        // worker). This is NOT the 15-min hard cap — timeoutMs is huge below.
+        applyJobPatchIfActive(workspace, jobId, { threadId: "th-IDLE", turnId: "tn-IDLE" });
+        const error = new Error("Codex turn stalled: no app-server activity for 5000ms");
+        error.code = "ETURNIDLE";
+        error.threadId = "th-IDLE";
+        error.turnId = "tn-IDLE";
+        throw error;
+      },
+      {
+        timeoutMs: 60_000, // hard cap NOT reached; the idle rejection drives remediation
+        interruptOnTimeout: async (cwd, ctx) => {
+          calls.push({ cwd, ctx });
+        },
+        terminateOnTimeout: (pid) => killed.push(pid)
+      }
+    ),
+    /stalled|idle|activity/i
+  );
+
+  assert.equal(calls.length, 1, "an idle (ETURNIDLE) rejection must interrupt the orphan turn");
+  assert.deepEqual(calls[0].ctx, { threadId: "th-IDLE", turnId: "tn-IDLE" });
+
+  // The terminate is scheduled on an unref'd macrotask; let it fire.
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(killed.length, 1, "an idle rejection must also schedule a worker terminate");
+
+  const record = JSON.parse(fs.readFileSync(resolveJobFile(workspace, jobId), "utf8"));
+  assert.equal(record.status, "failed");
+  assert.equal(record.idleTimedOut, true, "the failure record should be tagged as an idle timeout");
+  assert.notEqual(record.timedOut, true, "an idle rejection is distinct from the hard-cap timeout");
+});
+
 test("runTrackedJob does not terminate on a normal (non-timeout) failure", async () => {
   const workspace = makeTempDir();
   const killed = [];

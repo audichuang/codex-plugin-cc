@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -17,6 +18,18 @@ function seedJobInWorkspaceDir(workspaceDirName, job) {
   fs.mkdirSync(jobsDir, { recursive: true });
   fs.writeFileSync(path.join(jobsDir, `${job.id}.json`), JSON.stringify(job));
 }
+
+test("the test harness redirects HOME so collectCandidateStateRoots never reads the real ~/.claude", () => {
+  // collectCandidateStateRoots defaults its homedir to os.homedir() and walks
+  // ~/.claude/plugins/data for codex* state dirs. The hermetic harness (helpers.mjs)
+  // must redirect HOME to a throwaway sandbox so these lookups never touch the
+  // developer's real home — the CLAUDE.md "never reads the real ~/.claude" contract.
+  const home = os.homedir();
+  assert.ok(
+    home.startsWith(os.tmpdir()),
+    `os.homedir() must resolve to a temp sandbox during tests, got: ${home}`
+  );
+});
 
 test("collectCandidateStateRoots includes the configured plugin-data state root", () => {
   fs.mkdirSync(STATE_ROOT, { recursive: true });

@@ -12,7 +12,8 @@ import {
   hasActiveBackgroundJobs
 } from "../plugins/codex/scripts/lib/state.mjs";
 import { enqueueBackgroundTask } from "../plugins/codex/scripts/codex-companion.mjs";
-import { cleanupSessionJobs, shouldTeardownBroker } from "../plugins/codex/scripts/session-lifecycle-hook.mjs";
+import { cleanupSessionJobs, handleSessionEnd, shouldTeardownBroker } from "../plugins/codex/scripts/session-lifecycle-hook.mjs";
+import { saveBrokerSession } from "../plugins/codex/scripts/lib/broker-lifecycle.mjs";
 
 function seed(workspace, jobs) {
   for (const job of jobs) {
@@ -94,4 +95,68 @@ test("shouldTeardownBroker only tears down when not busy AND no active backgroun
   assert.equal(shouldTeardownBroker({ busy: true }, false), false, "busy broker is never torn down");
   assert.equal(shouldTeardownBroker({ busy: false }, true), false, "active background job keeps the shared broker alive");
   assert.equal(shouldTeardownBroker({ busy: true }, true), false);
+});
+
+test("handleSessionEnd does NOT send the broker/shutdown RPC while a background job is active", async () => {
+  const workspace = makeTempDir();
+  // Live worker pid => hasActiveBackgroundJobs is true (listJobs keeps it).
+  seed(workspace, [bgJob({ pid: process.pid })]);
+  saveBrokerSession(workspace, {
+    endpoint: "unix:/tmp/codex-broker-test.sock",
+    pidFile: null,
+    logFile: null,
+    sessionDir: null,
+    pid: 4242
+  });
+
+  const shutdownCalls = [];
+  const teardownCalls = [];
+  await handleSessionEnd(
+    { cwd: workspace, session_id: "S1" },
+    {
+      // The broker's own busy-gate would NOT refuse here (a queued/idle bg worker
+      // owns no in-flight request), so the caller must skip the RPC entirely.
+      sendBrokerShutdown: (endpoint) => {
+        shutdownCalls.push(endpoint);
+        return Promise.resolve({ busy: false });
+      },
+      teardownBrokerSession: (args) => {
+        teardownCalls.push(args);
+      }
+    }
+  );
+
+  assert.equal(shutdownCalls.length, 0, "an active background job must keep the shared broker alive — no self-shutdown RPC");
+  assert.equal(teardownCalls.length, 0, "and the local teardown must be skipped too");
+});
+
+test("handleSessionEnd sends broker/shutdown and tears down when no background job is active", async () => {
+  const workspace = makeTempDir();
+  // Dead worker pid => reconciled to inactive => the broker may be reaped.
+  seed(workspace, [bgJob({ pid: 2_147_483_646 })]);
+  saveBrokerSession(workspace, {
+    endpoint: "unix:/tmp/codex-broker-test.sock",
+    pidFile: null,
+    logFile: null,
+    sessionDir: null,
+    pid: 4242
+  });
+
+  const shutdownCalls = [];
+  const teardownCalls = [];
+  await handleSessionEnd(
+    { cwd: workspace, session_id: "S1" },
+    {
+      sendBrokerShutdown: (endpoint) => {
+        shutdownCalls.push(endpoint);
+        return Promise.resolve({ busy: false });
+      },
+      teardownBrokerSession: (args) => {
+        teardownCalls.push(args);
+      }
+    }
+  );
+
+  assert.equal(shutdownCalls.length, 1, "with no active background job the graceful shutdown RPC is sent");
+  assert.equal(teardownCalls.length, 1, "and the broker is torn down");
 });

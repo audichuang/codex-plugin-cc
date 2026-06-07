@@ -309,22 +309,30 @@ export async function runTrackedJob(job, runner, options = {}) {
     }
     const errorMessage = error instanceof Error ? error.message : String(error);
 
-    // On a hard timeout the runner is still pending and the underlying Codex
-    // turn is almost certainly hung. Best-effort interrupt it (using the
-    // thread/turn the progress updater recorded on the job) so Codex stops
-    // working instead of being orphaned. Only on timeout — a normal failure
-    // already unwound the turn.
-    if (timedOut) {
+    // An ETURNIDLE rejection is captureTurn's idle watchdog firing: the turn is
+    // wedged (no app-server activity for the idle window) but the worker itself is
+    // healthy. Like the hard timeout — and UNLIKE a normal failure — the underlying
+    // Codex turn has NOT been unwound (closing the broker socket does not stop it),
+    // so it needs the same best-effort interrupt + terminate remediation. Without
+    // this the idle watchdog would mark the job failed yet leave an orphan turn
+    // running on the shared broker (the exact thing its error message promises to
+    // interrupt + reap).
+    const idleTimedOut = error?.code === "ETURNIDLE";
+
+    // On a hard timeout (or idle watchdog) the underlying Codex turn is almost
+    // certainly still running. Best-effort interrupt it — using the thread/turn the
+    // progress updater recorded on the job, falling back to the ids carried on the
+    // idle error — so Codex stops working instead of being orphaned.
+    if (timedOut || idleTimedOut) {
       const interrupt = options.interruptOnTimeout ?? defaultInterruptOnTimeout;
       try {
         const stored = readJobFile(resolveJobFile(job.workspaceRoot, job.id));
         // interruptAppServerTurn no-ops unless BOTH ids are present; gate on AND
         // so a half-populated record does not trigger a guaranteed-useless RPC.
-        if (stored?.threadId && stored?.turnId) {
-          await interrupt(job.cwd ?? job.workspaceRoot, {
-            threadId: stored.threadId,
-            turnId: stored.turnId
-          });
+        const threadId = stored?.threadId ?? error?.threadId ?? null;
+        const turnId = stored?.turnId ?? error?.turnId ?? null;
+        if (threadId && turnId) {
+          await interrupt(job.cwd ?? job.workspaceRoot, { threadId, turnId });
         }
       } catch {
         // Best effort; never let interrupt failures mask the original error.
@@ -338,7 +346,8 @@ export async function runTrackedJob(job, runner, options = {}) {
       errorMessage,
       pid: null,
       completedAt,
-      ...(timedOut ? { timedOut: true } : {})
+      ...(timedOut ? { timedOut: true } : {}),
+      ...(idleTimedOut ? { idleTimedOut: true } : {})
     };
 
     // Route the failure write through the CAS helper so we never clobber a
@@ -385,12 +394,12 @@ export async function runTrackedJob(job, runner, options = {}) {
       });
     }
 
-    // On a hard timeout the runner is still pending and holding open handles
-    // (the broker socket), which can keep this process from exiting even after
-    // it reported failure. Schedule a process-tree terminate; .unref() means it
-    // only fires if the loop is otherwise blocked (i.e. genuinely stuck), so a
+    // On a hard timeout (or idle watchdog) the runner may still be holding open
+    // handles (the broker socket), which can keep this process from exiting even
+    // after it reported failure. Schedule a process-tree terminate; .unref() means
+    // it only fires if the loop is otherwise blocked (i.e. genuinely stuck), so a
     // process that can exit cleanly still does.
-    if (timedOut) {
+    if (timedOut || idleTimedOut) {
       const terminate = options.terminateOnTimeout ?? terminateProcessTree;
       const pid = Number(result.stored?.pid ?? runningRecord.pid);
       if (Number.isFinite(pid) && pid > 0) {

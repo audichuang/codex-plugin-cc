@@ -75,7 +75,12 @@ function readProcessTable(options = {}) {
   const runCommandImpl = options.runCommandImpl ?? runCommand;
   const result = runCommandImpl("ps", ["-A", "-o", "pid=,ppid="], {
     cwd: options.cwd,
-    env: options.env
+    env: options.env,
+    // The default spawnSync maxBuffer (~1MB) truncates a very large process table
+    // into an ENOBUFS error, which this function swallows into an empty descendant
+    // list — silently skipping the descendant sweep. ~16MB holds ~1M `pid ppid`
+    // rows, well beyond any realistic table, so a busy host still reaps the subtree.
+    maxBuffer: 16 * 1024 * 1024
   });
   if (result.error || result.status !== 0 || !result.stdout) {
     return [];

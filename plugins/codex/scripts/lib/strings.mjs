@@ -13,8 +13,13 @@ const BEL = String.fromCharCode(0x07); // BEL (0x07)
 // two-char Fe escape, so well-formed sequences are consumed whole.
 const ANSI_PATTERN = new RegExp(
   [
-    // OSC: ESC ] ... terminated by BEL or ST (ESC \)
-    `${ESC}\\][\\s\\S]*?(?:${BEL}|${ESC}\\\\)`,
+    // OSC: ESC ] <body> optionally terminated by BEL or ST (ESC \). The body is a
+    // bounded negated class [^BEL ESC]* (stops at the first BEL or the ESC that
+    // begins ST) rather than an unbounded lazy `[\s\S]*?` that re-walks to EOS on
+    // every unterminated opener — that lazy form is O(n^2) on a line carrying many
+    // raw ESC] openers with no terminator. The trailing terminator is optional so
+    // an unterminated opener is still consumed whole (opener + body) in one match.
+    `${ESC}\\][^${BEL}${ESC}]*(?:${BEL}|${ESC}\\\\)?`,
     // CSI: ESC [ <params 0x30-0x3F> <intermediates 0x20-0x2F> <final 0x40-0x7E>
     `${ESC}\\[[0-?]*[ -/]*[@-~]`,
     // Any other two-char Fe escape: ESC followed by a single byte 0x40-0x5F

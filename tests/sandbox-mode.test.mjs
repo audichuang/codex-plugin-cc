@@ -46,3 +46,17 @@ test("resolveSandboxMode ignores a blank CODEX_SANDBOX_MODE and falls back to th
     assert.equal(resolveSandboxMode("read-only"), "danger-full-access");
   });
 });
+
+test("resolveSandboxMode rejects an invalid CODEX_SANDBOX_MODE (typo) and warns, instead of forwarding it verbatim", () => {
+  withEnv("readonly", () => {
+    const warnings = [];
+    // A typo must NOT be forwarded to the app-server (which would fail thread/start
+    // with an opaque deserialization error); fall back to the default and warn.
+    assert.equal(resolveSandboxMode("read-only", { warn: (m) => warnings.push(m) }), "danger-full-access");
+    assert.equal(warnings.length, 1, "an invalid override should warn exactly once");
+    assert.match(warnings[0], /readonly/, "the warning should name the offending value");
+  });
+  withEnv("read_only", () => {
+    assert.equal(resolveSandboxMode("read-only", { warn: () => {} }), "danger-full-access");
+  });
+});

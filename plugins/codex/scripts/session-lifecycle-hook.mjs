@@ -119,7 +119,15 @@ function handleSessionStart(input) {
   appendEnvVar(PLUGIN_DATA_ENV, process.env[PLUGIN_DATA_ENV]);
 }
 
-async function handleSessionEnd(input) {
+export async function handleSessionEnd(input, deps = {}) {
+  // Injectable seams (default to the real imports) so the integrated
+  // shutdown -> cleanup -> teardown-decision path is testable without spawning a
+  // real broker or touching real processes.
+  const sendShutdown = deps.sendBrokerShutdown ?? sendBrokerShutdown;
+  const teardown = deps.teardownBrokerSession ?? teardownBrokerSession;
+  const hasActiveBackground = deps.hasActiveBackgroundJobs ?? hasActiveBackgroundJobs;
+  const cleanup = deps.cleanupSessionJobs ?? cleanupSessionJobs;
+
   const cwd = input.cwd || process.cwd();
   const brokerSession =
     loadBrokerSession(cwd) ??
@@ -136,14 +144,25 @@ async function handleSessionEnd(input) {
   const sessionDir = brokerSession?.sessionDir ?? null;
   const pid = brokerSession?.pid ?? null;
 
+  const workspaceRoot = resolveWorkspaceRoot(cwd);
+  const backgroundActive = hasActiveBackground(workspaceRoot);
+
   let shutdownResult = { busy: false };
   try {
-    if (brokerEndpoint) {
-      shutdownResult = await sendBrokerShutdown(brokerEndpoint);
+    // Gate the self-shutdown RPC on active background jobs too — not only the local
+    // teardown below. sendBrokerShutdown asks the broker to exit ITSELF, and the
+    // broker's busy-gate (shouldRefuseBrokerShutdown) only refuses while another
+    // socket owns an in-flight request/stream. A surviving background job that is
+    // queued / connecting / between its thread/start and turn/start owns no active
+    // socket, so the broker would NOT report busy and would exit — orphaning that
+    // job's app-server. Skipping the RPC here keeps the RPC decision symmetric with
+    // the already-gated teardown and honours the #355 background-survival intent.
+    if (brokerEndpoint && !backgroundActive) {
+      shutdownResult = await sendShutdown(brokerEndpoint);
     }
   } finally {
     // This session's foreground jobs end; background jobs survive (handled inside).
-    cleanupSessionJobs(cwd, input.session_id || process.env[SESSION_ID_ENV]);
+    cleanup(cwd, input.session_id || process.env[SESSION_ID_ENV]);
 
     // Only tear the broker down if it did NOT refuse as busy AND no background job
     // is still active. The broker is shared per-workspace; if another session/
@@ -152,9 +171,8 @@ async function handleSessionEnd(input) {
     // be defeated by this teardown). A surviving background job likewise needs its
     // app-server (the broker) kept alive. A timeout/other failure leaves
     // shutdownResult.busy false, so a genuinely wedged broker is still reaped.
-    const workspaceRoot = resolveWorkspaceRoot(cwd);
-    if (shouldTeardownBroker(shutdownResult, hasActiveBackgroundJobs(workspaceRoot))) {
-      teardownBrokerSession({
+    if (shouldTeardownBroker(shutdownResult, backgroundActive)) {
+      teardown({
         endpoint: brokerEndpoint,
         pidFile,
         logFile,
