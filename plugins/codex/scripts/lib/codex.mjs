@@ -73,8 +73,7 @@ function buildThreadParams(cwd, options = {}) {
     approvalPolicy: options.approvalPolicy ?? "never",
     sandbox: resolveSandboxMode(options.sandbox),
     serviceName: SERVICE_NAME,
-    ephemeral: options.ephemeral ?? true,
-    experimentalRawEvents: false
+    ephemeral: options.ephemeral ?? true
   };
 }
 
@@ -400,6 +399,26 @@ function scheduleInferredCompletion(state) {
   state.completionTimer.unref?.();
 }
 
+// A NARROW match for permanent authentication failures. Deliberately excludes
+// transient/server conditions (429, 5xx, rate limit, overloaded, timeouts) so we
+// never give up on something the app-server would have retried.
+const PERMANENT_AUTH_ERROR = /\b401\b|\b403\b|missing bearer|invalid api key|unauthor|authentication failed|forbidden/i;
+
+// Should an `error` notification terminate the turn? The protocol's willRetry flag
+// is authoritative: false means the app-server will NOT retry, so the turn would
+// otherwise hang with no turn/completed. When willRetry is absent (older protocol)
+// fall back to the narrow permanent-auth regex. willRetry === true is never
+// terminal — trust the server's retry.
+export function isTerminalTurnError(params) {
+  if (params?.willRetry === true) {
+    return false;
+  }
+  if (params?.willRetry === false) {
+    return true;
+  }
+  return PERMANENT_AUTH_ERROR.test(params?.error?.message ?? "");
+}
+
 function belongsToTurn(state, message) {
   const messageThreadId = extractThreadId(message);
   if (!messageThreadId || !state.threadIds.has(messageThreadId)) {
@@ -544,6 +563,16 @@ function applyTurnNotification(state, message) {
     case "error":
       state.error = message.params.error;
       emitProgress(state.onProgress, `Codex error: ${message.params.error.message}`, "failed");
+      // A non-retryable error (e.g. permanent auth failure) may never be followed
+      // by turn/completed, leaving the turn hung. Complete it as failed so the
+      // companion reaches a terminal state instead of waiting out the hard cap.
+      // Only the ROOT thread's error completes the turn — mirror the turn/completed
+      // handling, where a subagent thread's terminal event must not fail the parent.
+      if (isTerminalTurnError(message.params) && (message.params.threadId ?? null) === state.threadId) {
+        const failedTurnId =
+          state.threadTurnIds.get(state.threadId) ?? state.turnId ?? message.params.turnId ?? "error-turn";
+        completeTurn(state, { id: failedTurnId, status: "failed" });
+      }
       break;
     case "turn/completed":
       if ((message.params.threadId ?? null) !== state.threadId) {
@@ -563,11 +592,78 @@ function applyTurnNotification(state, message) {
   }
 }
 
-async function captureTurn(client, threadId, startRequest, options = {}) {
+export const TURN_IDLE_TIMEOUT_ENV = "CODEX_TURN_IDLE_TIMEOUT_MS";
+// Disabled by default. With all delta notifications opted out (DEFAULT_CAPABILITIES),
+// a healthy turn can legitimately be silent for minutes inside a single long item,
+// so a non-zero default could abort healthy work. Operators bound a wedged turn by
+// setting CODEX_TURN_IDLE_TIMEOUT_MS (e.g. 600000); background jobs still have the
+// 15-minute hard cap in tracked-jobs.
+export const DEFAULT_TURN_IDLE_TIMEOUT_MS = 0;
+
+export function resolveTurnIdleTimeoutMs(options = {}) {
+  if (Number.isFinite(options.idleTimeoutMs) && options.idleTimeoutMs >= 0) {
+    return Math.trunc(options.idleTimeoutMs);
+  }
+  const env = options.env ?? process.env;
+  const value = Number(env[TURN_IDLE_TIMEOUT_ENV]);
+  if (!Number.isFinite(value) || value < 0) {
+    return DEFAULT_TURN_IDLE_TIMEOUT_MS;
+  }
+  return Math.trunc(value); // 0 disables
+}
+
+function createTurnIdleError(threadId, turnId, idleTimeoutMs) {
+  const error = /** @type {Error & { code?: string, threadId?: string|null, turnId?: string|null, idleTimeoutMs?: number }} */ (
+    new Error(
+      `Codex turn stalled: no app-server activity for ${idleTimeoutMs}ms (thread ${threadId ?? "?"}, turn ${turnId ?? "?"}). The turn may be wedged; interrupt the turn and reap the broker if it persists.`
+    )
+  );
+  error.code = "ETURNIDLE";
+  error.threadId = threadId ?? null;
+  error.turnId = turnId ?? null;
+  error.idleTimeoutMs = idleTimeoutMs;
+  return error;
+}
+
+export async function captureTurn(client, threadId, startRequest, options = {}) {
   const state = createTurnCaptureState(threadId, options);
   const previousHandler = client.notificationHandler;
 
+  // Idle watchdog (#1): Codex exposes no app-server-level per-turn idle abort,
+  // and a turn wedged with the socket still open never resolves state.completion
+  // (the transport watchdog only fires on disconnect). An idle timer — reset on
+  // every inbound notification, fired only after a stretch of total silence —
+  // bounds that and rejects with the thread/turn id so a caller can interrupt +
+  // reap. It is complementary to (not a replacement for) the 15-minute hard cap.
+  const idleTimeoutMs = resolveTurnIdleTimeoutMs(options);
+  const timers = options.timers ?? { setTimeout, clearTimeout };
+  let idleTimer = null;
+  const clearIdleTimer = () => {
+    if (idleTimer !== null) {
+      timers.clearTimeout(idleTimer);
+      idleTimer = null;
+    }
+  };
+  const armIdleTimer = () => {
+    if (!(idleTimeoutMs > 0) || state.completed) {
+      return;
+    }
+    clearIdleTimer();
+    idleTimer = timers.setTimeout(() => {
+      idleTimer = null;
+      if (state.completed) {
+        return;
+      }
+      const turnId = state.threadTurnIds.get(state.threadId) ?? state.turnId ?? null;
+      const error = createTurnIdleError(state.threadId, turnId, idleTimeoutMs);
+      state.error = state.error ?? error;
+      state.rejectCompletion(error);
+    }, idleTimeoutMs);
+    idleTimer?.unref?.();
+  };
+
   client.setNotificationHandler((message) => {
+    armIdleTimer(); // any inbound notification is liveness — reset the idle window
     if (!state.turnId) {
       state.bufferedNotifications.push(message);
       return;
@@ -589,6 +685,7 @@ async function captureTurn(client, threadId, startRequest, options = {}) {
   });
 
   try {
+    armIdleTimer(); // begin watching as soon as the turn is in flight
     const response = await startRequest();
     options.onResponse?.(response, state);
     state.turnId = response.turn?.id ?? null;
@@ -637,6 +734,7 @@ async function captureTurn(client, threadId, startRequest, options = {}) {
 
     return await state.completion;
   } finally {
+    clearIdleTimer();
     clearCompletionTimer(state);
     client.setNotificationHandler(previousHandler ?? null);
   }

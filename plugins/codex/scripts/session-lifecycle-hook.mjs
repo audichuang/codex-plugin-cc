@@ -17,23 +17,17 @@ import {
 } from "./lib/broker-lifecycle.mjs";
 import {
   applyJobPatchIfActive,
+  hasActiveBackgroundJobs,
   loadState,
   resolveStateFile,
   saveState,
   writeCompletionSignalFile
 } from "./lib/state.mjs";
 import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
+import { readHookInput } from "./lib/hook-input.mjs";
 
 export const SESSION_ID_ENV = "CODEX_COMPANION_SESSION_ID";
 const PLUGIN_DATA_ENV = "CLAUDE_PLUGIN_DATA";
-
-function readHookInput() {
-  const raw = fs.readFileSync(0, "utf8").trim();
-  if (!raw) {
-    return {};
-  }
-  return JSON.parse(raw);
-}
 
 function shellEscape(value) {
   return `'${String(value).replace(/'/g, `'\"'\"'`)}'`;
@@ -71,6 +65,13 @@ function cleanupSessionJobs(cwd, sessionId) {
     if (!stillRunning) {
       continue; // terminal session jobs are cleaned up (removed) below
     }
+    if (job.background === true) {
+      // Background jobs are designed to outlive the session — do NOT terminate
+      // them. They are still bounded by the liveness watchdog and the 15-minute
+      // hard cap. They are retained in the index below so the parent session's
+      // later /codex:status can still find them.
+      continue;
+    }
     try {
       terminateProcessTree(job.pid ?? Number.NaN);
     } catch {
@@ -100,8 +101,17 @@ function cleanupSessionJobs(cwd, sessionId) {
   const fresh = loadState(workspaceRoot);
   saveState(workspaceRoot, {
     ...fresh,
-    jobs: fresh.jobs.filter((job) => job.sessionId !== sessionId || keptIds.has(job.id))
+    jobs: fresh.jobs.filter(
+      (job) => job.sessionId !== sessionId || keptIds.has(job.id) || job.background === true
+    )
   });
+}
+
+// The shared per-workspace broker is torn down at SessionEnd only when it did NOT
+// refuse as busy AND no background job is still active in this workspace — a
+// surviving background job must keep its app-server (the broker) alive.
+export function shouldTeardownBroker(shutdownResult, hasActiveBackground) {
+  return !shutdownResult.busy && !hasActiveBackground;
 }
 
 function handleSessionStart(input) {
@@ -132,16 +142,18 @@ async function handleSessionEnd(input) {
       shutdownResult = await sendBrokerShutdown(brokerEndpoint);
     }
   } finally {
-    // This session's jobs end regardless.
+    // This session's foreground jobs end; background jobs survive (handled inside).
     cleanupSessionJobs(cwd, input.session_id || process.env[SESSION_ID_ENV]);
 
-    // Only tear the broker down if it did NOT refuse as busy. The broker is
-    // shared per-workspace; if another session/client is mid-turn it returns a
-    // busy error, and force-killing it here would abort that client's turn (the
-    // busy-gate in broker/shutdown would otherwise be defeated by this teardown).
-    // A timeout/other failure leaves shutdownResult.busy false, so a genuinely
-    // wedged broker is still reaped rather than leaked.
-    if (!shutdownResult.busy) {
+    // Only tear the broker down if it did NOT refuse as busy AND no background job
+    // is still active. The broker is shared per-workspace; if another session/
+    // client is mid-turn it returns a busy error, and force-killing it here would
+    // abort that client's turn (the busy-gate in broker/shutdown would otherwise
+    // be defeated by this teardown). A surviving background job likewise needs its
+    // app-server (the broker) kept alive. A timeout/other failure leaves
+    // shutdownResult.busy false, so a genuinely wedged broker is still reaped.
+    const workspaceRoot = resolveWorkspaceRoot(cwd);
+    if (shouldTeardownBroker(shutdownResult, hasActiveBackgroundJobs(workspaceRoot))) {
       teardownBrokerSession({
         endpoint: brokerEndpoint,
         pidFile,

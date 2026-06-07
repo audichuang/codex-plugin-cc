@@ -15,6 +15,7 @@ import readline from "node:readline";
 import { parseBrokerEndpoint } from "./broker-endpoint.mjs";
 import { ensureBrokerSession, loadBrokerSession } from "./broker-lifecycle.mjs";
 import { terminateProcessTree } from "./process.mjs";
+import { stripAnsi } from "./strings.mjs";
 
 const PLUGIN_MANIFEST_URL = new URL("../../.claude-plugin/plugin.json", import.meta.url);
 const PLUGIN_MANIFEST = JSON.parse(fs.readFileSync(PLUGIN_MANIFEST_URL, "utf8"));
@@ -32,6 +33,9 @@ const DEFAULT_CLIENT_INFO = {
 /** @type {InitializeCapabilities} */
 const DEFAULT_CAPABILITIES = {
   experimentalApi: false,
+  // Required by the codex app-server InitializeCapabilities schema (serde-default
+  // on the wire). We do not opt into attestation/generate requests.
+  requestAttestation: false,
   optOutNotificationMethods: [
     "item/agentMessage/delta",
     "item/reasoning/summaryTextDelta",
@@ -154,13 +158,26 @@ export class AppServerClientBase {
   }
 
   handleLine(line) {
-    if (!line.trim()) {
+    // Codex app-server stdout is pure JSONL, but the `codex` launcher (and a
+    // Windows shell wrapper) can interleave non-JSON noise — banners, update
+    // notices, stray log/ANSI output. Strip ANSI and skip any line that does not
+    // look like JSON instead of tearing the whole connection down (which would
+    // also kill the running turn) on the first unparseable line. Only a line
+    // that *looks* like JSON yet fails to parse is treated as a real protocol
+    // error.
+    const cleaned = stripAnsi(line).trim();
+    if (!cleaned) {
+      return;
+    }
+
+    const first = cleaned[0];
+    if (first !== "{" && first !== "[") {
       return;
     }
 
     let message;
     try {
-      message = JSON.parse(line);
+      message = JSON.parse(cleaned);
     } catch (error) {
       this.handleExit(createProtocolError(`Failed to parse codex app-server JSONL: ${error.message}`, { line }));
       return;
@@ -224,7 +241,7 @@ export class AppServerClientBase {
   }
 }
 
-class SpawnedCodexAppServerClient extends AppServerClientBase {
+export class SpawnedCodexAppServerClient extends AppServerClientBase {
   constructor(cwd, options = {}) {
     super(cwd, options);
     this.transport = "direct";
@@ -284,26 +301,28 @@ class SpawnedCodexAppServerClient extends AppServerClientBase {
 
     if (this.proc && !this.proc.killed) {
       this.proc.stdin.end();
-      setTimeout(() => {
-        if (this.proc && !this.proc.killed && this.proc.exitCode === null) {
-          // On Windows with shell: true, the direct child is cmd.exe.
-          // Use terminateProcessTree to kill the entire tree including
-          // the grandchild node process.
-          if (process.platform === "win32") {
-            try {
-              terminateProcessTree(this.proc.pid);
-            } catch {
-              // Best-effort cleanup inside an unref'd timer — swallow errors
-              // to avoid crashing the host process during shutdown.
-            }
-          } else {
-            this.proc.kill("SIGTERM");
-          }
-        }
-      }, 50).unref?.();
+      const graceMs = this.options.closeGraceMs ?? 50;
+      setTimeout(() => this.terminateChild(), graceMs).unref?.();
     }
 
     await this.exitPromise;
+  }
+
+  // Reap the codex app-server AND its subtree. The app-server spawns its own
+  // MCP/tool subprocesses; a bare SIGTERM to the direct child orphans them. Use
+  // terminateProcessTree on every platform (Windows: taskkill /T; POSIX: group
+  // kill + descendant sweep via the codex pid). Best-effort: this runs inside an
+  // unref'd timer during shutdown, so it must never throw.
+  terminateChild() {
+    if (!this.proc || this.proc.killed || this.proc.exitCode !== null) {
+      return;
+    }
+    const terminate = this.options.terminateProcessTreeImpl ?? terminateProcessTree;
+    try {
+      terminate(this.proc.pid);
+    } catch {
+      // swallow — host process must not crash during shutdown
+    }
   }
 
   sendMessage(message) {

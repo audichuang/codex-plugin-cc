@@ -11,7 +11,7 @@ they already have.
 
 - `/codex:review` for a normal read-only Codex review
 - `/codex:adversarial-review` for a steerable challenge review
-- `/codex:rescue`, `/codex:status`, `/codex:result`, and `/codex:cancel` to delegate work and manage background jobs
+- `/codex:rescue`, `/codex:status`, `/codex:result`, `/codex:attach`, and `/codex:cancel` to delegate work, watch it live, and manage background jobs
 
 ## Requirements
 
@@ -218,6 +218,22 @@ Examples:
 ```bash
 /codex:cancel
 /codex:cancel task-abc123
+```
+
+### `/codex:attach`
+
+Streams a background job's log live and returns once the job reaches a terminal
+status (completed / failed / cancelled) — instead of polling [`/codex:status`](#codexstatus)
+repeatedly. With no job id it attaches to the newest active job; a job id is
+resolved across workspaces if it isn't found locally. A wedged job is still
+bounded by the liveness watchdog and the 15-minute hard cap, so attach won't tail
+forever.
+
+Examples:
+
+```bash
+/codex:attach
+/codex:attach task-abc123
 ```
 
 ### `/codex:setup`

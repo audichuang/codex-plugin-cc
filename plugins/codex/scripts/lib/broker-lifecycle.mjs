@@ -225,9 +225,27 @@ export async function reapStaleBroker(session, options = {}) {
   }
 }
 
+// A recorded session is stale if its broker pid is provably dead. A crashed
+// broker can leave a lingering unix socket that still answers a ping, so reuse
+// must be gated on the pid being alive — not just the endpoint responding —
+// otherwise we adopt a dead broker and every turn fails. When the pid is unknown
+// (null / non-integer) we cannot prove death and fall back to the endpoint check.
+export function isSessionStale(session, options = {}) {
+  const aliveCheck = options.isProcessAlive ?? isProcessAlive;
+  const pid = Number(session?.pid);
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return false;
+  }
+  return !aliveCheck(pid);
+}
+
 export async function ensureBrokerSession(cwd, options = {}) {
   const existing = loadBrokerSession(cwd);
-  if (existing && (await isBrokerEndpointReady(existing.endpoint))) {
+  if (
+    existing &&
+    !isSessionStale(existing, { isProcessAlive: options.isProcessAlive }) &&
+    (await isBrokerEndpointReady(existing.endpoint))
+  ) {
     return existing;
   }
 

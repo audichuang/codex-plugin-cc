@@ -439,6 +439,16 @@ export function listJobs(cwd) {
   return reconcileDeadPidJobs(cwd, loadState(cwd).jobs);
 }
 
+// True when the workspace has at least one still-active background job. Used to
+// keep the shared per-workspace broker alive at SessionEnd: a background job that
+// outlives its session must not have the broker (its app-server) reaped out from
+// under it.
+export function hasActiveBackgroundJobs(cwd) {
+  return listJobs(cwd).some(
+    (job) => job.background === true && (job.status === "queued" || job.status === "running")
+  );
+}
+
 export function setConfig(cwd, key, value) {
   return updateState(cwd, (state) => {
     state.config = {
@@ -477,6 +487,86 @@ export function resolveJobLogFile(cwd, jobId) {
 export function resolveJobFile(cwd, jobId) {
   ensureStateDir(cwd);
   return path.join(resolveJobsDir(cwd), `${jobId}.json`);
+}
+
+// Resolve a per-job file from an ALREADY-KNOWN physical state dir, without
+// re-deriving it from a workspace path. Used when a job was located across
+// workspaces (its physical dir may not match the slug-hash a re-derivation
+// from job.workspaceRoot under the current CLAUDE_PLUGIN_DATA would produce).
+export function resolveJobFileInStateDir(stateDir, jobId) {
+  return path.join(stateDir, JOBS_DIR_NAME, `${jobId}.json`);
+}
+
+// All plausible state-root directories whose per-workspace subdirs may hold jobs:
+// the active CLAUDE_PLUGIN_DATA/state, the $TMPDIR fallback, and every
+// ~/.claude/plugins/data/codex-*/state. Only existing roots are returned. Used to
+// locate a job id given in one workspace from a command run in another.
+export function collectCandidateStateRoots(cwd, options = {}) {
+  const env = options.env ?? process.env;
+  const homedir = options.homedir ?? os.homedir();
+  const roots = new Set();
+
+  const pluginDataDir = env[PLUGIN_DATA_ENV];
+  if (pluginDataDir) {
+    roots.add(path.join(pluginDataDir, "state"));
+  }
+  roots.add(FALLBACK_STATE_ROOT_DIR);
+
+  if (homedir) {
+    const pluginsData = path.join(homedir, ".claude", "plugins", "data");
+    try {
+      for (const entry of fs.readdirSync(pluginsData, { withFileTypes: true })) {
+        if (entry.isDirectory() && entry.name.toLowerCase().startsWith("codex")) {
+          roots.add(path.join(pluginsData, entry.name, "state"));
+        }
+      }
+    } catch {
+      // ~/.claude/plugins/data may not exist — fine.
+    }
+  }
+
+  return [...roots].filter((root) => {
+    try {
+      return fs.existsSync(root);
+    } catch {
+      return false;
+    }
+  });
+}
+
+// Locate a job by its EXACT id across all candidate workspace state dirs. Used
+// ONLY as a fallback when an explicit job id is not found in the current
+// workspace; the default (no id) selection stays workspace/session-scoped to
+// avoid cross-workspace mis-selection.
+export function findJobByIdAcrossWorkspaces(cwd, jobId, options = {}) {
+  if (!jobId) {
+    return null;
+  }
+  for (const stateRoot of collectCandidateStateRoots(cwd, options)) {
+    let workspaceDirs;
+    try {
+      workspaceDirs = fs.readdirSync(stateRoot, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of workspaceDirs) {
+      if (!entry.isDirectory()) {
+        continue;
+      }
+      const workspaceStateDir = path.join(stateRoot, entry.name);
+      const jobFile = path.join(workspaceStateDir, JOBS_DIR_NAME, `${jobId}.json`);
+      let job = null;
+      try {
+        job = readJobFile(jobFile); // throws ENOENT when absent, or on malformed JSON
+      } catch {
+        continue;
+      }
+      if (job && job.id === jobId) {
+        return { job, workspaceStateDir };
+      }
+    }
+  }
+  return null;
 }
 
 export function resolveJobDoneFile(cwd, jobId) {

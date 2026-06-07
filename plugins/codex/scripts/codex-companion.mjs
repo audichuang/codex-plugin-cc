@@ -24,13 +24,18 @@ import { readStdinIfPiped } from "./lib/fs.mjs";
 import { collectReviewContext, ensureGitRepository, resolveReviewTarget } from "./lib/git.mjs";
 import { binaryAvailable, isProcessAlive, terminateProcessTree } from "./lib/process.mjs";
 import { loadPromptTemplate, interpolateTemplate } from "./lib/prompts.mjs";
+import { truncateToByteBudget } from "./lib/strings.mjs";
 import {
   applyJobPatchIfActive,
   claimTerminalTransition,
   generateJobId,
   getConfig,
   listJobs,
+  readJobFile,
   resolveJobDoneFile,
+  resolveJobFile,
+  resolveJobFileInStateDir,
+  resolveJobLogFile,
   setConfig,
   upsertJob,
   writeCompletionSignalFile,
@@ -263,15 +268,37 @@ async function handleSetup(argv) {
   outputResult(options.json ? finalReport : renderSetupReport(finalReport), options.json);
 }
 
-function buildAdversarialReviewPrompt(context, focusText) {
+// Codex's API rejects inputs over ~1 MB. The adversarial-review prompt inlines
+// the collected review content (self-collect diffs + untracked files) verbatim,
+// which is otherwise unbounded. Cap the FINAL rendered prompt well under the hard
+// limit, truncating only the variable review input on a UTF-8 boundary so a huge
+// diff degrades to a truncated-but-valid prompt instead of a hard API failure.
+export const MAX_REVIEW_PROMPT_BYTES = 800 * 1024;
+const REVIEW_TRUNCATION_NOTICE =
+  "\n\n[... review input truncated to fit the Codex input size limit; review the most relevant changes above ...]\n";
+
+export function buildAdversarialReviewPrompt(context, focusText) {
   const template = loadPromptTemplate(ROOT_DIR, "adversarial-review");
-  return interpolateTemplate(template, {
-    REVIEW_KIND: "Adversarial Review",
-    TARGET_LABEL: context.target.label,
-    USER_FOCUS: focusText || "No extra focus provided.",
-    REVIEW_COLLECTION_GUIDANCE: context.collectionGuidance,
-    REVIEW_INPUT: context.content
-  });
+  const render = (reviewInput) =>
+    interpolateTemplate(template, {
+      REVIEW_KIND: "Adversarial Review",
+      TARGET_LABEL: context.target.label,
+      USER_FOCUS: focusText || "No extra focus provided.",
+      REVIEW_COLLECTION_GUIDANCE: context.collectionGuidance,
+      REVIEW_INPUT: reviewInput
+    });
+
+  const full = render(context.content);
+  if (Buffer.byteLength(full, "utf8") <= MAX_REVIEW_PROMPT_BYTES) {
+    return full;
+  }
+
+  // Reserve room for the template framing (everything except REVIEW_INPUT) and
+  // the truncation notice, then fit the review content into what remains.
+  const overheadBytes = Buffer.byteLength(render(""), "utf8") + Buffer.byteLength(REVIEW_TRUNCATION_NOTICE, "utf8");
+  const contentBudget = Math.max(0, MAX_REVIEW_PROMPT_BYTES - overheadBytes);
+  const truncated = `${truncateToByteBudget(context.content, contentBudget)}${REVIEW_TRUNCATION_NOTICE}`;
+  return render(truncated);
 }
 
 function ensureCodexAvailable(cwd) {
@@ -578,8 +605,13 @@ function buildTaskRunMetadata({ prompt, resumeLast = false }) {
   };
 }
 
-function renderQueuedTaskLaunch(payload) {
-  return `${payload.title} started in the background as ${payload.jobId}. Check /codex:status ${payload.jobId} for progress.\n`;
+export function renderQueuedTaskLaunch(payload) {
+  // Human line + a machine-readable sentinel so a consumer scanning stdout can
+  // reliably detect the dispatch and capture the job id without parsing prose.
+  return (
+    `${payload.title} started in the background as ${payload.jobId}. Check /codex:status ${payload.jobId} for progress.\n` +
+    `[[codex-task status=dispatched id=${payload.jobId}]]\n`
+  );
 }
 
 function getJobKindLabel(kind, jobClass) {
@@ -705,7 +737,10 @@ function enqueueBackgroundTask(cwd, job, request, deps = {}) {
     phase: "queued",
     pid: child.pid ?? null,
     logFile,
-    request
+    request,
+    // Background jobs are designed to outlive the dispatching session/turn (e.g. a
+    // subagent-dispatched --background rescue). SessionEnd cleanup must not reap them.
+    background: true
   };
   writeJobFile(job.workspaceRoot, job.id, queuedRecord);
   upsertJob(job.workspaceRoot, queuedRecord);
@@ -1064,6 +1099,134 @@ async function handleCancel(argv) {
   outputCommandResult(payload, renderCancelReport(nextJob), options.json);
 }
 
+const TERMINAL_JOB_STATUSES = new Set(["completed", "failed", "cancelled"]);
+
+// Poll-and-tail loop for /codex:attach: emit new log bytes, and once the job
+// reaches a terminal status do one final flush and exit. Fully seam-injectable
+// (readChunk/readStatus/sleep/write) for deterministic tests; maxPolls is a
+// safety bound so a never-terminal job can't loop forever.
+export async function streamJobLog(deps = {}) {
+  const readChunk = deps.readChunk ?? (() => "");
+  const readStatus = deps.readStatus ?? (() => null);
+  const sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+  const write = deps.write ?? ((text) => process.stdout.write(text));
+  const pollIntervalMs = deps.pollIntervalMs ?? 500;
+  const maxPolls = deps.maxPolls ?? Number.POSITIVE_INFINITY;
+  // If the per-job record can't be read (pruned by MAX_JOBS eviction, or resolved
+  // to the wrong state dir), readStatus returns null. Give up after a bounded run
+  // of consecutive nulls so the tail degrades to a clean stop instead of looping
+  // forever. A readable status resets the run.
+  const maxConsecutiveNullStatus = deps.maxConsecutiveNullStatus ?? 20;
+
+  let polls = 0;
+  let nullStatusRun = 0;
+  for (;;) {
+    const chunk = readChunk();
+    if (chunk) {
+      write(chunk);
+    }
+    const status = readStatus();
+    if (status && TERMINAL_JOB_STATUSES.has(status)) {
+      const tail = readChunk();
+      if (tail) {
+        write(tail);
+      }
+      return status;
+    }
+    if (status == null) {
+      nullStatusRun += 1;
+      if (nullStatusRun >= maxConsecutiveNullStatus) {
+        return null;
+      }
+    } else {
+      nullStatusRun = 0;
+    }
+    polls += 1;
+    if (polls >= maxPolls) {
+      return status;
+    }
+    await sleep(pollIntervalMs);
+  }
+}
+
+export async function handleAttach(argv, deps = {}) {
+  const { options, positionals } = parseCommandInput(argv, {
+    valueOptions: ["cwd", "poll-interval-ms"],
+    booleanOptions: ["json"]
+  });
+  const cwd = resolveCommandCwd(options);
+  const reference = positionals.join(" ").trim() || null;
+
+  // Resolve the job: an explicit reference (local, then cross-workspace via
+  // buildSingleJobSnapshot's fallback), else the newest still-active job in the
+  // current workspace.
+  let workspaceRoot;
+  let jobId;
+  let logFile;
+  let statusFile;
+  if (reference) {
+    const snapshot = buildSingleJobSnapshot(cwd, reference);
+    workspaceRoot = snapshot.workspaceRoot;
+    jobId = snapshot.job.id;
+    logFile = snapshot.job.logFile ?? resolveJobLogFile(workspaceRoot, jobId);
+    // For a cross-workspace hit, read status from the job's PHYSICAL state dir;
+    // re-deriving from workspaceRoot can resolve to a different (missing) path.
+    statusFile = snapshot.stateDir
+      ? resolveJobFileInStateDir(snapshot.stateDir, jobId)
+      : resolveJobFile(workspaceRoot, jobId);
+  } else {
+    workspaceRoot = resolveCommandWorkspace(options);
+    const active = sortJobsNewestFirst(listJobs(workspaceRoot)).find(
+      (job) => job.status === "queued" || job.status === "running"
+    );
+    if (!active) {
+      throw new Error("No active Codex job to attach to. Run /codex:status to inspect known jobs.");
+    }
+    jobId = active.id;
+    logFile = active.logFile ?? resolveJobLogFile(workspaceRoot, jobId);
+    statusFile = resolveJobFile(workspaceRoot, jobId);
+  }
+
+  let offset = 0;
+  const readChunk =
+    deps.readChunk ??
+    (() => {
+      try {
+        const buf = fs.readFileSync(logFile);
+        if (buf.length <= offset) {
+          return "";
+        }
+        const slice = buf.subarray(offset).toString("utf8");
+        offset = buf.length;
+        return slice;
+      } catch {
+        return ""; // log not created yet / transient read error — try again next poll
+      }
+    });
+  const readStatus =
+    deps.readStatus ??
+    (() => {
+      try {
+        return readJobFile(statusFile)?.status ?? null;
+      } catch {
+        return null;
+      }
+    });
+
+  const pollIntervalMs = deps.pollIntervalMs ?? (Number(options["poll-interval-ms"]) || 500);
+  return streamJobLog({
+    readChunk,
+    readStatus,
+    sleep: deps.sleep,
+    write: deps.write,
+    pollIntervalMs,
+    // Finite production ceiling (past the 15-min liveness hard cap) so a job that
+    // never reaches a readable terminal state can't tail forever.
+    maxPolls: deps.maxPolls ?? 2400,
+    maxConsecutiveNullStatus: deps.maxConsecutiveNullStatus
+  });
+}
+
 async function main() {
   const [subcommand, ...argv] = process.argv.slice(2);
   if (!subcommand || subcommand === "help" || subcommand === "--help") {
@@ -1092,6 +1255,9 @@ async function main() {
     case "status":
       await handleStatus(argv);
       break;
+    case "attach":
+      await handleAttach(argv);
+      break;
     case "result":
       handleResult(argv);
       break;
@@ -1106,14 +1272,25 @@ async function main() {
   }
 }
 
+// Structured failure envelope mirrored to stdout. The codex-rescue subagent (and
+// other machine consumers) capture stdout only, so a stderr-only failure is
+// invisible to them — they would see an empty result and assume success.
+export function buildMainErrorEnvelope(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  return { status: "error", error: message, exitCode: 1 };
+}
+
 const invokedDirectly =
   process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 
 if (invokedDirectly) {
   main().catch((error) => {
-    const message = error instanceof Error ? error.message : String(error);
-    process.stderr.write(`${message}\n`);
-    process.exitCode = 1;
+    const envelope = buildMainErrorEnvelope(error);
+    // stdout: structured envelope for machine consumers (rescue subagent).
+    process.stdout.write(`${JSON.stringify(envelope)}\n`);
+    // stderr: the human-readable message, as before.
+    process.stderr.write(`${envelope.error}\n`);
+    process.exitCode = envelope.exitCode;
   });
 }
 

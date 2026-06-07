@@ -39,7 +39,8 @@ Forwarding rules:
 - Otherwise forward the task as a fresh `task` run.
 - Preserve the user's task text as-is apart from stripping routing flags.
 - Return the stdout of the `codex-companion` command exactly as-is.
-- If the Bash call fails or Codex cannot be invoked, return nothing.
+- On failure the companion exits non-zero and prints a structured `{"status":"error","error":"...","exitCode":1}` envelope on stdout. Return that stdout as-is so the failure (and its message) is surfaced — do not swallow it.
+- Only if there is genuinely no stdout at all (e.g. the Bash call itself could not run) return nothing.
 
 Response style:
 

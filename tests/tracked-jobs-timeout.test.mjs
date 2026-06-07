@@ -21,6 +21,12 @@ test("runTrackedJob interrupts the hung turn when the hard timeout fires", async
       },
       {
         timeoutMs: 40,
+        // No-op terminate seam: runTrackedJob's hard-timeout path reaps the
+        // worker's own process tree (runningRecord.pid === this test process).
+        // Without the seam, terminateProcessTree would now actually SIGTERM the
+        // test runner (it correctly falls back to a direct kill when the pid is
+        // not a group leader). This test only exercises the interrupt path.
+        terminateOnTimeout: () => {},
         interruptOnTimeout: async (cwd, ctx) => {
           calls.push({ cwd, ctx });
         }
@@ -54,6 +60,12 @@ test("runTrackedJob does not interrupt on timeout when only one of threadId/turn
       },
       {
         timeoutMs: 40,
+        // No-op terminate seam: runTrackedJob's hard-timeout path reaps the
+        // worker's own process tree (runningRecord.pid === this test process).
+        // Without the seam, terminateProcessTree would now actually SIGTERM the
+        // test runner (it correctly falls back to a direct kill when the pid is
+        // not a group leader). This test only exercises the interrupt path.
+        terminateOnTimeout: () => {},
         interruptOnTimeout: async (cwd, ctx) => {
           calls.push({ cwd, ctx });
         }

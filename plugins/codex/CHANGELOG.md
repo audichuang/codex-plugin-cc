@@ -1,5 +1,120 @@
 # Changelog
 
+## 1.0.12
+
+Reliability batch 4 (UX / observability) + the SessionEnd background-job decision:
+
+- **Background jobs survive their session (decision on #355).** A `--background`
+  job — especially a subagent-dispatched `--background` rescue — is designed to
+  outlive the dispatching turn, but SessionEnd unconditionally terminated every
+  session job (the subagent's turn end ≈ SessionEnd), killing the just-detached
+  worker. Background jobs are now marked `background: true` and skipped by
+  `cleanupSessionJobs` (kept running and retained in the index so the parent
+  session's later `/codex:status` still finds them). The shared broker is also
+  kept alive at SessionEnd while any background job is still active
+  (`shouldTeardownBroker` + `hasActiveBackgroundJobs`), composing with the
+  existing busy-gate. Background jobs remain bounded by the liveness watchdog and
+  the 15-minute hard cap.
+- **`/codex:attach` — live log tail.** New thin command that streams a job's log
+  as it is produced and exits when the job reaches a terminal status. Resolves a
+  job by id (local, then across workspaces) or the newest active job. The tail
+  loop (`streamJobLog`) is seam-injectable and bounded by `maxPolls`.
+- **Cross-workspace job lookup.** A job id obtained in one workspace no longer
+  dead-ends as "Job not found" when queried from another: `findJobByIdAcrossWorkspaces`
+  (+ `collectCandidateStateRoots`) is used as a read-only fallback for an explicit
+  id not found locally. The default (no id) selection stays workspace/session-scoped.
+- **Dispatch sentinel.** Background launches print a machine-readable
+  `[[codex-task status=dispatched id=<id>]]` line so a consumer scanning stdout
+  can detect the dispatch and capture the job id without parsing prose.
+- **app-server type alignment (clean `npm run build`).** Aligned the JSON-RPC
+  params with the current Codex app-server schema: declare the now-required
+  `requestAttestation: false` capability (serde-default on the wire, so no
+  behavior change) and drop the removed `experimentalRawEvents` thread-start field
+  (Codex ignored it). `tsc` now passes with zero errors.
+
+## 1.0.11
+
+Reliability batch 3 (output & failure visibility):
+
+- **Cap the adversarial-review prompt under the Codex input limit.** The prompt
+  inlined the collected review content verbatim, so a large self-collected diff
+  could blow past Codex's ~1 MB input hard limit and fail outright. The final
+  rendered prompt is now capped (`MAX_REVIEW_PROMPT_BYTES`), truncating only the
+  review input on a UTF-8 boundary (`truncateToByteBudget`, never splitting a
+  multi-byte sequence) with a truncation notice — a huge diff degrades to a
+  truncated-but-valid prompt instead of a hard failure.
+- **Surface companion failures on stdout.** `main()` failures wrote only to
+  stderr; the `codex:codex-rescue` subagent captures stdout only, so a failure
+  was invisible to it (looked like an empty/successful result). Failures now also
+  emit a structured `{"status":"error","error":"...","exitCode":1}` envelope on
+  stdout (stderr keeps the human-readable message), and the rescue subagent
+  surfaces it instead of swallowing it.
+- **Short-circuit non-retryable turn errors.** An `error` notification only
+  recorded the error and waited for `turn/completed` — which never arrives for a
+  terminal failure (e.g. a permanent auth error), hanging the turn until the hard
+  cap. The turn is now completed as failed when the error is non-retryable, using
+  the protocol's authoritative `willRetry === false` signal (with a narrow
+  permanent-auth regex fallback when `willRetry` is absent). Transient/server
+  errors (429, 5xx, rate-limit, overloaded) are never short-circuited.
+
+## 1.0.10
+
+Reliability batch 2 (process / connection lifecycle):
+
+- **Reap the codex app-server subtree on close (no orphaned MCP children).** The
+  app-server spawns its own MCP/tool subprocesses; on POSIX `close()` used to send
+  a bare `SIGTERM` to the direct child only, orphaning that subtree. `close()` now
+  reaps the whole tree via `terminateProcessTree` on every platform.
+- **`terminateProcessTree` reaches non-group-leader subtrees (POSIX).** It now
+  enumerates descendant pids (best-effort, via `ps`; degrades to a plain kill if
+  `ps` is unavailable) and signals them, and a `kill(-pid)` `ESRCH` (which also
+  happens for a *live* process that is not a group leader, e.g. the codex
+  app-server inside the broker's group) now falls back to a direct `kill(pid)` —
+  only concluding the process is gone when that also `ESRCH`s. This also means a
+  wedged tracked-job worker is now actually terminated on hard timeout (previously
+  a silent no-op for a non-leader worker). The codex app-server is deliberately
+  NOT spawned detached: keeping it in the broker's process group means the
+  watchdog's `terminateProcessTree(brokerPid)` still reaps the whole subtree, with
+  the descendant sweep covering both the close-from-codex and reap-from-broker
+  paths — avoiding the orphan-on-reap regression that detaching would introduce.
+- **Don't reuse a dead broker.** `ensureBrokerSession` now gates reuse on the
+  recorded broker pid being alive (`isSessionStale`), not just the endpoint
+  answering — a crashed broker can leave a lingering unix socket that still pings.
+
+Deferred: stale broker after switching accounts (backlog #303). Replacing a
+per-workspace *shared* broker on an account mismatch conflicts with the
+shared-broker safety rules (busy-gated; never torn down unconditionally), and —
+verified against the Codex source — reading `account/read` *through* the broker
+cannot even detect an external switch (the long-lived app-server returns its own
+stale cached account). A correct fix must probe fresh on-disk auth and replace
+only an idle broker; tracked as a dedicated follow-up.
+
+## 1.0.9
+
+Reliability batch 1 (most-defensive, smallest, pure-backend fixes):
+
+- **Robust stdout JSONL parsing.** `AppServerClientBase.handleLine` — the single
+  chokepoint that parses raw Codex app-server stdout for both the direct client
+  and the broker's in-process client — now strips ANSI/terminal escapes and skips
+  any non-JSON line (launcher banners, stray logs) instead of tearing down the
+  whole connection (and killing the running turn) on the first unparseable line.
+  Only a line that *looks* like JSON yet fails to parse is still a fatal protocol
+  error. New `lib/strings.mjs#stripAnsi` (ECMA-48 OSC + CSI incl. bracketed-paste)
+  is a no-op on clean JSONL and never corrupts a JSON-encoded escape.
+- **Hook stdin tolerates pipe jitter.** The SessionStart/End and stop-gate hooks
+  shared a single-shot `fs.readFileSync(0)` with no error handling; an `EAGAIN`
+  on a non-blocking pipe crashed the hook and dropped the `session_id`. Both now
+  use `lib/hook-input.mjs#readHookInput`: a chunked read loop with a bounded
+  EAGAIN/EWOULDBLOCK retry (budget resets on progress) that returns `{}` on empty
+  input, jitter, or malformed JSON instead of throwing.
+- **captureTurn idle watchdog.** Added an opt-in per-turn idle timer
+  (`CODEX_TURN_IDLE_TIMEOUT_MS`, **disabled by default**) that resets on every
+  inbound notification and, after a stretch of total silence, rejects with an
+  error carrying the thread/turn id so a caller can interrupt + reap a wedged
+  turn whose socket stayed open. Disabled by default because all delta
+  notifications are opted out, so a healthy turn can legitimately be silent for
+  minutes inside a single long item; background jobs keep the 15-minute hard cap.
+
 ## 1.0.8
 
 - Fix two shared-broker correctness bugs found by a Codex review of 1.0.5–1.0.6:

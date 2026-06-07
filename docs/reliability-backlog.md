@@ -176,7 +176,9 @@
 | 項目 | 狀態 | 現況證據 | 修法 / 參考 |
 |------|------|---------|------------|
 | Broker PID 探活前置門 | PARTIAL | `broker-lifecycle.mjs:230` reuse 只靠 150ms socket ping（`:145-154`），crash 但 socket 還活的 broker 會被沿用 | 加 `isSessionStale(session)` 檢 `session.pid != null && !isProcessAlive(session.pid)`,AND 進 reuse 條件。PR #262 |
-| 登入切帳號後的 stale broker | GAP | `app-server.mjs:377-393` connect() 無 post-initialize 帳號驗證 | 加 `accountFingerprint`（`account/read`）比對,不符就替換 broker session;加 `resolveLiveBrokerEndpoint` 忽略死 endpoint。PR #303 |
+| 登入切帳號後的 stale broker | GAP（**DEFERRED**，見下方更正） | `app-server.mjs:377-393` connect() 無 post-initialize 帳號驗證 | 加 `accountFingerprint`（`account/read`）比對,不符就替換 broker session;加 `resolveLiveBrokerEndpoint` 忽略死 endpoint。PR #303 |
+
+> **⚠️ #303 已延後（1.0.10 驗證更正）**：原計畫「透過 broker 呼叫 `account/read` 比指紋」**行不通** —— 已對照 Codex 原碼確認，auth 是長壽 `AuthManager` 的記憶體 `RwLock<CachedAuth>`，只有 login/logout RPC 才 `reload()`；turn 與 `account/read` 都用快取。所以對一個在外部 `codex login` *之前*就啟動的共享 broker，`account/read` 仍回**舊**帳號，比指紋永遠相同、偵測不到切換。**正確做法**：(1) 偵測要讀**磁碟上最新的 auth**（fresh non-broker 探測 / 新起一個 app-server，啟動時讀 `auth.json`），與 broker 快取帳號比對；(2) 替換**只能在 broker 確為 idle 時**做（§0.5 共享 broker 不可無條件拆,須 busy-gate）。屬獨立批次,別當單一 gap 倉促做。
 | main() 失敗無 stdout 錯誤封包 | GAP | `codex-companion.mjs:1112-1117` catch 只寫 stderr,exitCode=1 | rescue agent 只抓 stdout → 失敗對它隱形。catch 也寫 `{status:'error',error,exitCode:1}` JSON 到 stdout;更新 `agents/codex-rescue.md` 回報 error 欄。PR #360 |
 | 永久 auth 錯誤不短路 | GAP | `codex.mjs:544-546` `error` case 只記錄不 `completeTurn` | 401/403/Missing bearer/invalid api key 命中窄 regex 就 `completeTurn(failed)`;regex 要窄,別誤殺 429/5xx。PR #294 |
 | 背景完成 sentinel + `--await` | PARTIAL | 有 `.done` signal（`codex-companion.mjs:723-734`）+ `status --wait`（`:905-916`,`waitForSingleJobSnapshot :343-356`）,但缺機器可讀 sentinel 行與 `--await` | 加 `[[codex-task status=dispatched id=...]]` 哨符行到 `renderQueuedTaskLaunch`;可選 `task --background --await`（複用 `waitForSingleJobSnapshot` block 到終態）。PR #346/#347 |

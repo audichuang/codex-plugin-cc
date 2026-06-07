@@ -74,6 +74,7 @@ test("continue is not exposed as a user-facing command", () => {
   const commandFiles = fs.readdirSync(path.join(PLUGIN_ROOT, "commands")).sort();
   assert.deepEqual(commandFiles, [
     "adversarial-review.md",
+    "attach.md",
     "cancel.md",
     "execute-plan.md",
     "handoff.md",
@@ -157,7 +158,10 @@ test("rescue command absorbs continue semantics", () => {
   assert.match(agent, /If the user asks for a concrete model name such as `gpt-5\.4-mini`, pass it through with `--model`/i);
   assert.doesNotMatch(agent, /spark/i);
   assert.match(agent, /Return the stdout of the `codex-companion` command exactly as-is/i);
-  assert.match(agent, /If the Bash call fails or Codex cannot be invoked, return nothing/i);
+  // #360: failures now print a structured {"status":"error",...} envelope on
+  // stdout; the subagent must surface it rather than swallow the failure.
+  assert.match(agent, /On failure the companion exits non-zero and prints a structured.*envelope on stdout\. Return that stdout as-is/i);
+  assert.match(agent, /Only if there is genuinely no stdout at all .* return nothing/i);
   assert.match(agent, /gpt-5-5-prompting/);
   assert.match(agent, /only to tighten the user's request into a better Codex prompt/i);
   assert.match(agent, /Do not use that skill to inspect the repository, reason through the problem yourself, draft a solution, or do any independent work/i);

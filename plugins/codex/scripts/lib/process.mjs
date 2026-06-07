@@ -68,6 +68,75 @@ function looksLikeMissingProcessMessage(text) {
   return /not found|no running instance|cannot find|does not exist|no such process/i.test(text);
 }
 
+// Best-effort snapshot of the POSIX process table as [{ pid, ppid }]. Returns []
+// on any failure (ps missing, non-zero exit, unparseable) so callers degrade to
+// a plain group/single kill rather than throwing.
+function readProcessTable(options = {}) {
+  const runCommandImpl = options.runCommandImpl ?? runCommand;
+  const result = runCommandImpl("ps", ["-A", "-o", "pid=,ppid="], {
+    cwd: options.cwd,
+    env: options.env
+  });
+  if (result.error || result.status !== 0 || !result.stdout) {
+    return [];
+  }
+  const table = [];
+  for (const line of result.stdout.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      continue;
+    }
+    const [pidStr, ppidStr] = trimmed.split(/\s+/);
+    const pid = Number(pidStr);
+    const ppid = Number(ppidStr);
+    if (Number.isInteger(pid) && Number.isInteger(ppid)) {
+      table.push({ pid, ppid });
+    }
+  }
+  return table;
+}
+
+// All descendant pids of rootPid (excluding rootPid itself), derived from a
+// process table. A wedged child that is not a process-group leader cannot be
+// reached by kill(-rootPid), so we enumerate and signal it directly.
+function collectDescendantPids(rootPid, options = {}) {
+  let table;
+  try {
+    table = options.psImpl ? options.psImpl() : readProcessTable(options);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(table) || table.length === 0) {
+    return [];
+  }
+  const childrenOf = new Map();
+  for (const entry of table) {
+    const pid = Number(entry?.pid);
+    const ppid = Number(entry?.ppid);
+    if (!Number.isInteger(pid) || !Number.isInteger(ppid)) {
+      continue;
+    }
+    if (!childrenOf.has(ppid)) {
+      childrenOf.set(ppid, []);
+    }
+    childrenOf.get(ppid).push(pid);
+  }
+  const descendants = [];
+  const seen = new Set([rootPid]);
+  const stack = [rootPid];
+  while (stack.length > 0) {
+    const current = stack.pop();
+    for (const child of childrenOf.get(current) ?? []) {
+      if (!seen.has(child)) {
+        seen.add(child);
+        descendants.push(child);
+        stack.push(child);
+      }
+    }
+  }
+  return descendants;
+}
+
 export function isProcessAlive(pidValue) {
   const pid = Number(pidValue);
   if (!Number.isFinite(pid) || pid <= 0) {
@@ -130,23 +199,36 @@ export function terminateProcessTree(pid, options = {}) {
     throw new Error(formatCommandFailure(result));
   }
 
+  // POSIX: reap any descendant pids first (best-effort). kill(-pid) only reaches
+  // a process group, so a child that is not itself a group leader (e.g. the
+  // codex app-server's MCP/tool subprocesses) survives a bare group/single kill.
+  for (const descendantPid of collectDescendantPids(pid, options)) {
+    try {
+      killImpl(descendantPid, "SIGTERM");
+    } catch {
+      // Best-effort: a descendant may have already exited (ESRCH) between the
+      // snapshot and the signal; never let that abort reaping the rest.
+    }
+  }
+
   try {
     killImpl(-pid, "SIGTERM");
     return { attempted: true, delivered: true, method: "process-group" };
   } catch (error) {
-    if (error?.code !== "ESRCH") {
-      try {
-        killImpl(pid, "SIGTERM");
-        return { attempted: true, delivered: true, method: "process" };
-      } catch (innerError) {
-        if (innerError?.code === "ESRCH") {
-          return { attempted: true, delivered: false, method: "process" };
-        }
-        throw innerError;
+    // kill(-pid) failed. ESRCH here only means "no such process GROUP" — which is
+    // also the case for a LIVE process that is not a group leader (e.g. the codex
+    // app-server spawned inside the broker's group). So always fall back to a
+    // direct kill of the pid, and only conclude the process is gone when THAT
+    // also reports ESRCH.
+    try {
+      killImpl(pid, "SIGTERM");
+      return { attempted: true, delivered: true, method: "process" };
+    } catch (innerError) {
+      if (innerError?.code === "ESRCH") {
+        return { attempted: true, delivered: false, method: "process" };
       }
+      throw innerError;
     }
-
-    return { attempted: true, delivered: false, method: "process-group" };
   }
 }
 

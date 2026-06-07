@@ -1,7 +1,7 @@
 import fs from "node:fs";
 
 import { getSessionRuntimeStatus } from "./codex.mjs";
-import { getConfig, listJobs, readJobFile, resolveJobFile } from "./state.mjs";
+import { findJobByIdAcrossWorkspaces, getConfig, listJobs, readJobFile, resolveJobFile } from "./state.mjs";
 import { SESSION_ID_ENV } from "./tracked-jobs.mjs";
 import { resolveWorkspaceRoot } from "./workspace.mjs";
 
@@ -296,7 +296,30 @@ export function buildStatusSnapshot(cwd, options = {}) {
 export function buildSingleJobSnapshot(cwd, reference, options = {}) {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
   const jobs = sortJobsNewestFirst(listJobs(workspaceRoot));
-  const selected = matchJobReference(jobs, reference);
+  let selected;
+  try {
+    selected = matchJobReference(jobs, reference);
+  } catch (error) {
+    // An explicit, full job id not found locally may belong to a job dispatched
+    // from another workspace. Fall back to an exact cross-workspace lookup
+    // (read-only) so the id does not dead-end as "Job not found". A bare prefix
+    // won't match the per-job file, so it correctly re-throws the local error.
+    if (reference) {
+      const found = findJobByIdAcrossWorkspaces(cwd, reference);
+      if (found) {
+        return {
+          workspaceRoot: found.job.workspaceRoot ?? workspaceRoot,
+          // The PHYSICAL state dir where the job actually lives. Re-deriving it
+          // from job.workspaceRoot under the current CLAUDE_PLUGIN_DATA can miss
+          // (different host/root), so callers needing the per-job file must use this.
+          stateDir: found.workspaceStateDir,
+          job: enrichJob(found.job, { maxProgressLines: options.maxProgressLines }),
+          crossWorkspace: true
+        };
+      }
+    }
+    throw error;
+  }
   if (!selected) {
     throw new Error(`No job found for "${reference}". Run /codex:status to inspect known jobs.`);
   }
