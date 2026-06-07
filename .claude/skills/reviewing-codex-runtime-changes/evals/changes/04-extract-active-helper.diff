@@ -1,0 +1,19 @@
+Proposed change to plugins/codex/scripts/lib/state.mjs — "extract the active-status check into a small helper (no behavior change)"
+
+@@ near the top of the module @@
++// queued and running are the two non-terminal (active) job states.
++function isActiveStatus(status) {
++  return status === "queued" || status === "running";
++}
+
+@@ pruneJobs @@
+-  const isActive = (job) => job.status === "queued" || job.status === "running";
++  const isActive = (job) => isActiveStatus(job.status);
+
+@@ wherever the same literal check appears for a job's status @@
+-  if (job.status === "queued" || job.status === "running") {
++  if (isActiveStatus(job.status)) {
+
+Note: pure refactor — isActiveStatus is exactly the previous inline predicate,
+the active-jobs-are-never-pruned logic in pruneJobs is unchanged, and no terminal
+write, broker, or signalling path is touched.

@@ -1,0 +1,14 @@
+Proposed change to plugins/codex/scripts/lib/tracked-jobs.mjs — "handle the idle (ETURNIDLE) timeout: kill the stuck worker so the job ends"
+
+@@ in runTrackedJob's catch, handling error.code === "ETURNIDLE" @@
++  if (error?.code === "ETURNIDLE") {
++    // The turn went silent past the idle window. Terminate the worker process
++    // tree so the job stops and we can mark it failed.
++    if (Number.isInteger(job.pid) && job.pid > 0) {
++      terminateProcessTree(job.pid);
++    }
++    applyJobPatchIfActive(cwd, job.id, () => ({ status: "failed", phase: "failed", errorMessage: "idle timeout" }));
++  }
+
+Note: this path does NOT call interruptAppServerTurn / turn/interrupt; it only
+terminates the worker process tree and marks the job failed.

@@ -148,3 +148,6 @@ vite.config.ts.timestamp-*
 
 output/
 plugins/codex/.generated/
+
+# skill-creator eval workspaces (regenerable artifacts)
+.claude/skills/*-workspace/

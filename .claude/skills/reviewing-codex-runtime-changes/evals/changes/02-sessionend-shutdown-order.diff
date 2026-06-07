@@ -1,0 +1,20 @@
+Proposed change to plugins/codex/scripts/session-lifecycle-hook.mjs — "tidy up handleSessionEnd: always send the graceful shutdown first"
+
+@@ async function handleSessionEnd(input, deps = {}) @@
+   const workspaceRoot = resolveWorkspaceRoot(cwd);
+-  const backgroundActive = hasActiveBackground(workspaceRoot);
+-
+   let shutdownResult = { busy: false };
+   try {
+-    // Gate the self-shutdown RPC on active background jobs too.
+-    if (brokerEndpoint && !backgroundActive) {
++    if (brokerEndpoint) {
+       shutdownResult = await sendShutdown(brokerEndpoint);
+     }
+   } finally {
+     cleanup(cwd, input.session_id || process.env[SESSION_ID_ENV]);
+-    if (shouldTeardownBroker(shutdownResult, backgroundActive)) {
++    if (shouldTeardownBroker(shutdownResult, hasActiveBackground(workspaceRoot))) {
+       teardown({ endpoint: brokerEndpoint, pidFile, logFile, sessionDir, pid, killProcess: terminateProcessTree });
+     }
+   }
