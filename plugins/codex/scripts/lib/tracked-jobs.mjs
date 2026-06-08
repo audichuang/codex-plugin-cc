@@ -42,7 +42,13 @@ async function defaultInterruptOnTimeout(cwd, ctx) {
 
 export const SESSION_ID_ENV = "CODEX_COMPANION_SESSION_ID";
 export const JOB_TIMEOUT_ENV = "CODEX_JOB_TIMEOUT_MS";
-export const DEFAULT_JOB_TIMEOUT_MS = 15 * 60 * 1000;
+// Unconditional wall-clock backstop for a background job (layer 2). A single
+// task call can legitimately run many TDD cycles (npm/vitest/tsc), so 1h is long
+// enough not to cut a healthy long job, yet short enough that a wedged job never
+// runs all day. A confirmed-dead job (broker unreachable + silent past the
+// watchdog's hangQuietMs) is still reaped in ~15 min, independent of this cap.
+// Override per-call with options.timeoutMs / --timeout-ms, or via CODEX_JOB_TIMEOUT_MS.
+export const DEFAULT_JOB_TIMEOUT_MS = 60 * 60 * 1000;
 
 export function nowIso() {
   return new Date().toISOString();

@@ -4,7 +4,29 @@ import assert from "node:assert/strict";
 
 import { makeTempDir } from "./helpers.mjs";
 import { applyJobPatchIfActive, resolveJobFile } from "../plugins/codex/scripts/lib/state.mjs";
-import { runTrackedJob } from "../plugins/codex/scripts/lib/tracked-jobs.mjs";
+import { runTrackedJob, DEFAULT_JOB_TIMEOUT_MS } from "../plugins/codex/scripts/lib/tracked-jobs.mjs";
+
+test("the default background-job hard cap is one hour", () => {
+  // A single task call can legitimately run many TDD cycles (npm/vitest/tsc),
+  // so the unconditional wall-clock backstop is 1h — long enough not to cut a
+  // healthy long job, short enough that a wedged background job never runs all
+  // day. (The watchdog still reaps a confirmed-dead job — broker unreachable +
+  // silent past hangQuietMs — in ~15 min, independent of this cap.)
+  assert.equal(DEFAULT_JOB_TIMEOUT_MS, 60 * 60 * 1000);
+});
+
+test("a tracked job with no explicit timeout records the one-hour deadline", async () => {
+  // helpers.mjs drops ambient CODEX_*, so CODEX_JOB_TIMEOUT_MS is unset and the
+  // default applies. The runner settles immediately, so the timer never fires —
+  // we only assert the deadline the running record was stamped with.
+  const workspace = makeTempDir();
+  const jobId = "job-default-timeout";
+
+  await runTrackedJob({ id: jobId, workspaceRoot: workspace }, async () => "ok", {});
+
+  const record = JSON.parse(fs.readFileSync(resolveJobFile(workspace, jobId), "utf8"));
+  assert.equal(record.timeoutMs, 60 * 60 * 1000);
+});
 
 test("runTrackedJob interrupts the hung turn when the hard timeout fires", async () => {
   const workspace = makeTempDir();

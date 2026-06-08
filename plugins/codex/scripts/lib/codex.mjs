@@ -632,7 +632,7 @@ export const TURN_IDLE_TIMEOUT_ENV = "CODEX_TURN_IDLE_TIMEOUT_MS";
 // a healthy turn can legitimately be silent for minutes inside a single long item,
 // so a non-zero default could abort healthy work. Operators bound a wedged turn by
 // setting CODEX_TURN_IDLE_TIMEOUT_MS (e.g. 600000); background jobs still have the
-// 15-minute hard cap in tracked-jobs.
+// 1-hour hard cap in tracked-jobs (DEFAULT_JOB_TIMEOUT_MS).
 export const DEFAULT_TURN_IDLE_TIMEOUT_MS = 0;
 
 export function resolveTurnIdleTimeoutMs(options = {}) {
@@ -675,7 +675,7 @@ export async function captureTurn(client, threadId, startRequest, options = {}) 
   // (the transport watchdog only fires on disconnect). An idle timer — reset on
   // every inbound notification, fired only after a stretch of total silence —
   // bounds that and rejects with the thread/turn id so a caller can interrupt +
-  // reap. It is complementary to (not a replacement for) the 15-minute hard cap.
+  // reap. It is complementary to (not a replacement for) the 1-hour hard cap.
   const idleTimeoutMs = resolveTurnIdleTimeoutMs(options);
   const timers = options.timers ?? { setTimeout, clearTimeout };
   let idleTimer = null;

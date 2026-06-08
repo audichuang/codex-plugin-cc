@@ -1228,9 +1228,11 @@ export async function handleAttach(argv, deps = {}) {
     sleep: deps.sleep,
     write: deps.write,
     pollIntervalMs,
-    // Finite production ceiling (past the 15-min liveness hard cap) so a job that
-    // never reaches a readable terminal state can't tail forever.
-    maxPolls: deps.maxPolls ?? 2400,
+    // Finite production ceiling (past the 1-hour job hard cap) so a job that
+    // never reaches a readable terminal state can't tail forever. 7800 polls ×
+    // 500ms ≈ 65 min, leaving headroom beyond DEFAULT_JOB_TIMEOUT_MS so a healthy
+    // long job is still followed to its own terminal state, not cut off early.
+    maxPolls: deps.maxPolls ?? 7800,
     maxConsecutiveNullStatus: deps.maxConsecutiveNullStatus
   });
 }

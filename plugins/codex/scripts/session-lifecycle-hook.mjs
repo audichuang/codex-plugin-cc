@@ -73,7 +73,7 @@ function cleanupSessionJobs(cwd, sessionId, deps = {}) {
     }
     if (job.background === true) {
       // Background jobs are designed to outlive the session — do NOT terminate
-      // them. They are still bounded by the liveness watchdog and the 15-minute
+      // them. They are still bounded by the liveness watchdog and the 1-hour
       // hard cap. They are retained in the index below so the parent session's
       // later /codex:status can still find them.
       continue;
