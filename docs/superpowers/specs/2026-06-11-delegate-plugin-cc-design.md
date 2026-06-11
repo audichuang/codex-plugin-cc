@@ -126,6 +126,18 @@ plugins 與全域設定檔；模型路由的隔離完全由上述 env 重建保�
 `ANTHROPIC_MODEL` 設成 opus）呼叫 spawn 組裝函式，斷言產出的 env 不含污染值、
 含 profile 注入值、含遞迴標記。
 
+### 為什麼不用 tmux 隔離（評估過 claudecode-telegram 的做法後的裁定）
+
+claudecode-telegram（bridge.py `create_session`）用 detached tmux session 起
+互動式 Claude 實例，其隔離 = 「pane shell 從 tmux server 程序樹出生（不繼承
+呼叫者執行期 env）」+「主動剝除 `CLAUDECODE`」+「主動注入需要的 env」——
+本質與本節的 env 重建是同一招。tmux 對它是必需品（互動式 TUI、常駐、attach），
+代價是 send-keys 競態、pane 讀回、trust-prompt 處理與大量 sleep。
+本 plugin 的 delegate 是 headless 一次性 `claude -p`，stdout 直接擷取
+stream-json，套 tmux 只會繼承那些痛點；且 tmux 新 shell 會重讀 rc 檔，
+rc 裡的 `ANTHROPIC_*` 照樣進來，profile env 注入仍然省不掉。
+故採 env 重建（一個 ~20 行純函式 + 單元測試），不引入 tmux 依賴。
+
 ## 8. 防遞迴
 
 - spawn 時注入 `CLAUDE_DELEGATE_ACTIVE=1`。
