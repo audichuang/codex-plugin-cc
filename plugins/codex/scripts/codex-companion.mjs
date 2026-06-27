@@ -706,15 +706,45 @@ async function runForegroundCommand(job, runner, options = {}) {
   return execution;
 }
 
-function spawnDetachedTaskWorker(cwd, jobId) {
+function spawnDetachedTaskWorker(cwd, jobId, logFile = null, deps = {}) {
+  const spawnImpl = deps.spawnImpl ?? spawn;
+  const openLog = deps.openLog ?? ((p) => fs.openSync(p, "a"));
+  const closeLog = deps.closeLog ?? ((fd) => fs.closeSync(fd));
   const scriptPath = path.join(ROOT_DIR, "scripts", "codex-companion.mjs");
-  const child = spawn(process.execPath, [scriptPath, "task-worker", "--cwd", cwd, "--job-id", jobId], {
+
+  // Inherit the detached worker's stderr into the job log so a crash stack (the
+  // app-server dispatch guard's diagnostic, or the crash-net's final log line) is
+  // preserved in background mode — previously stdio:"ignore" sent it to /dev/null,
+  // exactly the forensics we want under daily Codex churn. Best effort: fall back
+  // to "ignore" if the log cannot be opened.
+  let stderrTarget = "ignore";
+  let logFd = null;
+  if (logFile) {
+    try {
+      logFd = openLog(logFile);
+      stderrTarget = logFd;
+    } catch {
+      stderrTarget = "ignore";
+      logFd = null;
+    }
+  }
+
+  const child = spawnImpl(process.execPath, [scriptPath, "task-worker", "--cwd", cwd, "--job-id", jobId], {
     cwd,
     env: process.env,
     detached: true,
-    stdio: "ignore",
+    stdio: ["ignore", "ignore", stderrTarget],
     windowsHide: true
   });
+
+  if (logFd !== null) {
+    try {
+      closeLog(logFd); // the child inherited the fd; the parent no longer needs its copy
+    } catch {
+      // already closed / never opened
+    }
+  }
+
   child.unref();
   return child;
 }
@@ -738,7 +768,7 @@ function enqueueBackgroundTask(cwd, job, request, deps = {}) {
   const { logFile } = createTrackedProgress(job);
   appendLogLine(logFile, "Queued for background execution.");
 
-  const child = spawnWorker(cwd, job.id);
+  const child = spawnWorker(cwd, job.id, logFile);
   const queuedRecord = {
     ...job,
     status: "queued",

@@ -60,3 +60,46 @@ test("handleLine preserves a JSON-encoded ESC escape inside a string value", () 
   assert.equal(client.notifications[0].params.text, `a${ESC}b`);
   assert.ok(!client.exitResolved);
 });
+
+// A notification handler throwing (e.g. an unguarded dereference on a Codex
+// notification whose shape changed across a Codex upgrade) must NOT propagate
+// out of handleLine. The handler is invoked synchronously inside the transport
+// `data`/`line` listener with no try/catch above it, so a propagated throw
+// becomes an uncaughtException that crashes the worker process mid-turn — the
+// job then never records a terminal status and only surfaces later as the
+// cryptic "exited without reporting a terminal status" dead-PID reconcile.
+class ThrowingHandlerClient extends AppServerClientBase {
+  constructor(onThrow) {
+    super("/tmp");
+    this.delivered = [];
+    this.setNotificationHandler((message) => {
+      this.delivered.push(message.method);
+      onThrow?.(message);
+    });
+  }
+  sendMessage() {}
+}
+
+test("handleLine contains a throwing notification handler instead of crashing the reader", () => {
+  const client = new ThrowingHandlerClient(() => {
+    throw new Error("boom: unexpected notification shape");
+  });
+  assert.doesNotThrow(
+    () => client.handleLine('{"method":"turn/started","params":{}}'),
+    "a handler throw must be contained, not propagated to the stream listener"
+  );
+  assert.deepEqual(client.delivered, ["turn/started"], "the handler still ran");
+  assert.ok(!client.exitResolved, "a handler throw must not tear down the connection / kill the turn");
+});
+
+test("handleLine keeps processing later notifications after one handler throw", () => {
+  let calls = 0;
+  const client = new ThrowingHandlerClient(() => {
+    calls += 1;
+    if (calls === 1) throw new Error("boom on first notification");
+  });
+  client.handleLine('{"method":"item/completed","params":{}}'); // throws internally
+  client.handleLine('{"method":"turn/completed","params":{}}'); // must still be delivered
+  assert.deepEqual(client.delivered, ["item/completed", "turn/completed"]);
+  assert.ok(!client.exitResolved);
+});

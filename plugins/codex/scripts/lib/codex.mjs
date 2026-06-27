@@ -705,24 +705,42 @@ export async function captureTurn(client, threadId, startRequest, options = {}) 
 
   client.setNotificationHandler((message) => {
     armIdleTimer(); // any inbound notification is liveness — reset the idle window
-    if (!state.turnId) {
-      state.bufferedNotifications.push(message);
-      return;
-    }
+    // This runs synchronously inside the transport stream listener, with no
+    // try/catch above it once it reaches the data callback. A notification whose
+    // shape changed across a Codex upgrade (e.g. a `fileChange` item without the
+    // `changes` array our renderer dereferences) would throw and crash the worker
+    // mid-turn — surfacing only as the cryptic "exited without reporting a
+    // terminal status" reconcile. Contain it: skip the notification, log a named
+    // diagnostic to the job log (so the offending shape stays discoverable in all
+    // modes, incl. background where stderr is /dev/null), and keep the turn alive.
+    try {
+      if (!state.turnId) {
+        state.bufferedNotifications.push(message);
+        return;
+      }
 
-    if (message.method === "thread/started" || message.method === "thread/name/updated") {
-      applyTurnNotification(state, message);
-      return;
-    }
+      if (message.method === "thread/started" || message.method === "thread/name/updated") {
+        applyTurnNotification(state, message);
+        return;
+      }
 
-    if (!belongsToTurn(state, message)) {
+      if (!belongsToTurn(state, message)) {
         if (previousHandler) {
           previousHandler(message);
         }
         return;
-    }
+      }
 
-    applyTurnNotification(state, message);
+      applyTurnNotification(state, message);
+    } catch (error) {
+      emitProgress(
+        state.onProgress,
+        `Skipped a notification we could not process (method=${message?.method ?? "?"}): ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+        null
+      );
+    }
   });
 
   try {

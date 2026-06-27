@@ -116,6 +116,47 @@ test("captureTurn keeps the turn alive while notifications arrive, then complete
   assert.equal(timers.pending(), 0, "the idle timer must be cleared once the turn completes");
 });
 
+test("captureTurn contains a malformed notification instead of crashing the turn", async () => {
+  const client = makeFakeClient();
+  const timers = fakeTimers();
+  const progress = [];
+  const promise = captureTurn(
+    client,
+    "thread1",
+    async () => ({ turn: { id: "turn1", status: "inProgress" } }),
+    { idleTimeoutMs: 5000, timers, onProgress: (event) => progress.push(event) }
+  );
+  await tick();
+
+  // A fileChange item whose shape changed across a Codex upgrade (here: no
+  // `changes` array) makes the real item renderer deref `item.changes.length`
+  // and throw a TypeError. This handler is invoked synchronously from the live
+  // stream listener, so an uncontained throw crashes the worker mid-turn — the
+  // job never records a terminal status ("exited without reporting").
+  assert.doesNotThrow(() => {
+    client.notificationHandler({
+      method: "item/started",
+      params: { threadId: "thread1", item: { type: "fileChange" } }
+    });
+  }, "a malformed notification must not crash / abort the turn");
+
+  // The skip must be diagnosable (named) rather than silent. emitProgress emits a
+  // bare string when there is no phase, an object otherwise — accept both.
+  const skipNote = progress
+    .map((event) => (typeof event === "string" ? event : event?.message))
+    .find((message) => typeof message === "string" && /skip|could not process|notification/i.test(message));
+  assert.ok(skipNote, "skipping a malformed notification should emit a diagnostic to the job log");
+  assert.match(skipNote, /method=item\/started/, "the diagnostic should name the offending notification method");
+
+  // The turn must still complete normally after the skipped notification.
+  client.notificationHandler({
+    method: "turn/completed",
+    params: { threadId: "thread1", turn: { id: "turn1", status: "completed" } }
+  });
+  const state = await promise;
+  assert.equal(state.completed, true);
+});
+
 test("captureTurn arms no idle timer when the idle timeout is disabled (0)", async () => {
   const client = makeFakeClient();
   const timers = fakeTimers();

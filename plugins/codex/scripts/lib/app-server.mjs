@@ -207,7 +207,24 @@ export class AppServerClientBase {
     }
 
     if (message.method && this.notificationHandler) {
-      this.notificationHandler(/** @type {AppServerNotification} */ (message));
+      // handleLine is the single chokepoint all app-server notifications pass
+      // through, and it runs synchronously inside the transport `data`/`line`
+      // listener with NO try/catch above it. A handler throw (e.g. an unguarded
+      // dereference on a notification whose shape changed across a Codex upgrade)
+      // would otherwise become an uncaughtException that crashes the worker
+      // mid-turn — the job then never records a terminal status and only surfaces
+      // later as the cryptic "exited without reporting a terminal status" reconcile.
+      // Contain it here so one unexpected notification can never kill the turn:
+      // skip that notification and keep reading, mirroring the parse-noise policy
+      // above. Logged (method + error) so the offending shape stays diagnosable.
+      try {
+        this.notificationHandler(/** @type {AppServerNotification} */ (message));
+      } catch (error) {
+        const detail = error instanceof Error ? error.stack ?? error.message : String(error);
+        process.stderr.write(
+          `[codex] notification handler threw for method=${message.method}; skipped to keep the turn alive: ${detail}\n`
+        );
+      }
     }
   }
 

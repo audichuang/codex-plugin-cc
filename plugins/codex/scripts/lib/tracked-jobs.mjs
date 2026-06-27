@@ -187,6 +187,144 @@ export function createProgressReporter({ stderr = false, logFile = null, onEvent
   };
 }
 
+// Last-resort crash net for a tracked job. Installed by runTrackedJob for exactly
+// the duration of the run and removed in its finally — never a permanent global
+// listener (that would change Node's default fatal behavior for unrelated, non-job
+// companion subcommands such as status/result/cancel). While a job is in flight, an
+// uncaught exception or unhandled rejection — e.g. a synchronous throw from a
+// transport stream `data` listener, which never reaches runTrackedJob's try/catch —
+// would otherwise kill the worker with NO terminal write, surfacing only later as
+// the cryptic "exited without reporting a terminal status" dead-PID reconcile. This
+// converts any such crash into a RECORDED failure (real error), writes the .done
+// signal so a waiting monitor wakes, then exits nonzero so the death is unambiguous.
+//
+// First-terminal-writer-wins: mirrors runTrackedJob's failure path (CAS via
+// applyJobPatchIfActive; guarded recreate only when the file was pruned AND the
+// cross-process terminal claim is won), so it never resurrects a terminal record nor
+// stomps a .done another actor (watchdog/cancel/reconcile) already wrote. It does
+// NOT touch the shared broker: the orphaned Codex turn (which runs on the broker,
+// not in this worker) is left to the watchdog/idle layers — recording the death is
+// this net's job, reaping the turn is not.
+export function installJobCrashNet(job, runningRecord, options = {}) {
+  const proc = options.proc ?? process;
+  const now = options.now ?? nowIso;
+  const exit = options.exit ?? ((code) => proc.exit(code));
+  const logFile = options.logFile ?? job.logFile ?? runningRecord?.logFile ?? null;
+  // Reaping the orphaned turn: the crashed worker's death does NOT stop the Codex
+  // turn (it runs on the shared broker, not in this process). Best-effort interrupt
+  // it via the broker when its identity is known — NEVER touch the broker process.
+  const interrupt = options.interruptOnCrash ?? defaultInterruptOnTimeout;
+  const interruptTimeoutMs = Number.isFinite(options.interruptTimeoutMs) ? options.interruptTimeoutMs : 3000;
+  const readStoredJob =
+    options.readJob ??
+    (() => {
+      try {
+        return readJobFile(resolveJobFile(job.workspaceRoot, job.id));
+      } catch {
+        return null;
+      }
+    });
+  let fired = false;
+
+  const onFatal = async (error) => {
+    if (fired) {
+      return; // a single crash; ignore secondary errors triggered during teardown
+    }
+    fired = true;
+
+    // Capture turn identity from the per-job file (the progress updater writes
+    // threadId/turnId there once the turn starts) BEFORE finalizing, so we can
+    // reap the orphaned turn even though the finalize patch sets pid:null.
+    const stored = readStoredJob();
+    const threadId = stored?.threadId ?? null;
+    const turnId = stored?.turnId ?? null;
+
+    const detail = error instanceof Error ? error.stack ?? error.message : String(error);
+    const reason = `Worker process crashed with an uncaught error; auto-finalized as failed: ${detail}`;
+    const completedAt = now();
+    const failurePatch = {
+      status: "failed",
+      phase: "failed",
+      errorMessage: reason,
+      pid: null,
+      completedAt,
+      crashed: true
+    };
+
+    let wrote = false;
+    try {
+      const result = applyJobPatchIfActive(job.workspaceRoot, job.id, (existing) => ({
+        ...failurePatch,
+        logFile: logFile ?? existing.logFile ?? null
+      }));
+      wrote = result.applied;
+      if (
+        !wrote &&
+        result.stored === null &&
+        !indexedTerminalStatus(job.workspaceRoot, job.id) &&
+        claimTerminalTransition(job.workspaceRoot, job.id, "failed", completedAt)
+      ) {
+        writeJobFile(job.workspaceRoot, job.id, {
+          ...runningRecord,
+          ...failurePatch,
+          logFile: logFile ?? runningRecord?.logFile ?? null
+        });
+        upsertJob(job.workspaceRoot, { id: job.id, ...failurePatch });
+        wrote = true;
+      }
+    } catch {
+      // Never let the crash handler itself throw before it can exit.
+    }
+
+    if (wrote) {
+      try {
+        appendLogLine(logFile, reason);
+      } catch {
+        // best effort — logging must never block the exit
+      }
+      try {
+        writeCompletionSignalFile(job.workspaceRoot, job.id, { status: "failed", reason });
+      } catch {
+        // best effort
+      }
+    }
+
+    // Best-effort, bounded reap of the orphaned turn. Recording the death above is
+    // the primary job and is already done, so this must never block the exit:
+    // registering an uncaughtException/unhandledRejection listener suppresses Node's
+    // auto-exit, so we keep control and terminate via exit() once the interrupt
+    // resolves or the bound elapses (a hung/unreachable broker can't wedge us here).
+    if (threadId && turnId) {
+      let timer = null;
+      try {
+        await Promise.race([
+          Promise.resolve(interrupt(job.cwd ?? job.workspaceRoot, { threadId, turnId })),
+          new Promise((resolve) => {
+            timer = setTimeout(resolve, interruptTimeoutMs);
+            timer?.unref?.();
+          })
+        ]);
+      } catch {
+        // best effort — the failure is already recorded regardless
+      } finally {
+        if (timer) {
+          clearTimeout(timer);
+        }
+      }
+    }
+
+    exit(1);
+  };
+
+  proc.on("uncaughtException", onFatal);
+  proc.on("unhandledRejection", onFatal);
+
+  return () => {
+    proc.removeListener("uncaughtException", onFatal);
+    proc.removeListener("unhandledRejection", onFatal);
+  };
+}
+
 export async function runTrackedJob(job, runner, options = {}) {
   const timeoutMs = resolveJobTimeoutMs(options);
   const runningRecord = {
@@ -201,6 +339,18 @@ export async function runTrackedJob(job, runner, options = {}) {
   };
   writeJobFile(job.workspaceRoot, job.id, runningRecord);
   upsertJob(job.workspaceRoot, runningRecord);
+
+  // Crash net for the duration of the run: any uncaught throw / unhandled
+  // rejection that bypasses the try/catch below (notably a synchronous throw from
+  // a transport stream listener) is recorded as a terminal failure instead of a
+  // silent worker death. Disposed in the finally so it is never a permanent global
+  // listener.
+  const disposeCrashNet = installJobCrashNet(job, runningRecord, {
+    logFile: options.logFile ?? job.logFile ?? null,
+    proc: options.proc,
+    exit: options.exit,
+    now: options.now
+  });
 
   // Layer-2 watchdog: no matter what goes wrong inside runner (captureTurn
   // hang, broker wedge, internal deadlock), this timer guarantees the job
@@ -419,5 +569,7 @@ export async function runTrackedJob(job, runner, options = {}) {
       }
     }
     throw error;
+  } finally {
+    disposeCrashNet();
   }
 }
