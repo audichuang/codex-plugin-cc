@@ -1,5 +1,33 @@
 # Changelog
 
+## 1.0.19
+
+Stop a Codex worker from dying silently. A notification whose shape changed across a
+Codex upgrade could make a handler dereference throw inside the transport stream
+listener; on Node 26 that uncaught exception killed the worker mid-turn with no
+terminal status, surfacing only later as the cryptic "exited without reporting a
+terminal status" dead-PID reconcile.
+
+- `app-server.mjs`: wrap the notification dispatch chokepoint (`handleLine`) in
+  try/catch — a throwing handler is logged and skipped instead of tearing down the
+  connection / killing the turn (the same policy already used for unparseable lines).
+  This also covers the broker's own notification router.
+- `codex.mjs`: guard `captureTurn`'s notification handler and log the skipped method
+  to the job log (visible in both foreground and background).
+- `tracked-jobs.mjs`: add `installJobCrashNet` — for the duration of a tracked job,
+  an uncaught exception / unhandled rejection CAS-finalizes the job as failed (with
+  the real error), writes the `.done` signal, best-effort interrupts the orphaned
+  turn on the broker (when thread/turn id is known), then exits non-zero.
+  First-terminal-writer-wins: it never resurrects a terminal job or stomps another
+  actor's `.done`.
+- `codex-companion.mjs`: route a detached background worker's stderr (fd2) into the
+  job log so crash stacks survive (was `stdio: "ignore"` → /dev/null).
+
+## 1.0.18
+
+- Raise the background-job hard timeout from 15 minutes to 1 hour, so a long but
+  healthy delegated task is no longer cut off early.
+
 ## 1.0.17
 
 Docs/test-clarity polish from the 1.0.16 review. **No behavior change.**
